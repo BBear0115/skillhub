@@ -66,14 +66,14 @@ def build_workspace_initialize_result(workspace: Workspace) -> dict[str, Any]:
     }
 
 
-def build_tools_list(skill: Skill) -> dict[str, Any]:
+def build_tools_list(tools: list[Tool]) -> dict[str, Any]:
     tools = [
         {
             "name": tool.name,
             "description": tool.description or "",
             "inputSchema": tool.input_schema or {},
         }
-        for tool in skill.tools
+        for tool in tools
     ]
     return {"tools": tools}
 

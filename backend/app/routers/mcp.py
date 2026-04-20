@@ -81,20 +81,21 @@ def _validate_session(mcp_session_id: str | None, workspace_id: int, mode: str) 
     return sess
 
 
-def _workspace_skill_payload(skill: Skill) -> dict:
+def _tool_payload(tool: Tool) -> dict:
+    return {
+        "name": tool.name,
+        "description": tool.description or "",
+        "inputSchema": tool.input_schema or {},
+    }
+
+
+def _workspace_skill_payload(skill: Skill, tools: list[Tool]) -> dict:
     return {
         "skill_id": skill.id,
         "skill_name": skill.name,
         "description": skill.description or "",
         "mcp_endpoint": f"/mcp/{skill.workspace_id}/{skill.id}",
-        "tools": [
-            {
-                "name": tool.name,
-                "description": tool.description or "",
-                "inputSchema": tool.input_schema or {},
-            }
-            for tool in skill.tools
-        ],
+        "tools": [_tool_payload(tool) for tool in tools],
     }
 
 
@@ -153,8 +154,12 @@ async def workspace_mcp_post(
         if tool_name == "skills_list":
             skills = session.exec(select(Skill).where(Skill.workspace_id == workspace_id)).all()
             skills = [skill for skill in skills if is_skill_visible_in_workspace(workspace, skill, membership)]
+            tool_rows = session.exec(select(Tool).where(Tool.skill_id.in_([skill.id for skill in skills if skill.id is not None]))).all() if skills else []
+            tools_by_skill_id: dict[int, list[Tool]] = {}
+            for tool in tool_rows:
+                tools_by_skill_id.setdefault(tool.skill_id, []).append(tool)
             result = {
-                "content": [{"type": "text", "text": json.dumps({"skills": [_workspace_skill_payload(skill) for skill in skills]}, ensure_ascii=False, indent=2)}],
+                "content": [{"type": "text", "text": json.dumps({"skills": [_workspace_skill_payload(skill, tools_by_skill_id.get(skill.id, [])) for skill in skills]}, ensure_ascii=False, indent=2)}],
                 "isError": False,
             }
             return _jsonrpc_result(req_id, result)
@@ -163,8 +168,9 @@ async def workspace_mcp_post(
             skill = _resolve_workspace_skill(session, workspace_id, arguments)
             if not skill or not is_skill_visible_in_workspace(workspace, skill, membership):
                 return _jsonrpc_error(req_id, -32602, "Skill not found")
+            skill_tools = session.exec(select(Tool).where(Tool.skill_id == skill.id)).all()
             result = {
-                "content": [{"type": "text", "text": json.dumps(_workspace_skill_payload(skill), ensure_ascii=False, indent=2)}],
+                "content": [{"type": "text", "text": json.dumps(_workspace_skill_payload(skill, skill_tools), ensure_ascii=False, indent=2)}],
                 "isError": False,
             }
             return _jsonrpc_result(req_id, result)
@@ -256,7 +262,10 @@ async def mcp_post(
         return _jsonrpc_error(req_id, -32001, str(exc))
 
     if method == "tools/list":
-        return _jsonrpc_result(req_id, mcp_protocol.build_tools_list(skill))
+        for session in get_session():
+            skill_tools = session.exec(select(Tool).where(Tool.skill_id == skill_id)).all()
+            return _jsonrpc_result(req_id, mcp_protocol.build_tools_list(skill_tools))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Tool lookup failed")
 
     if method == "ping":
         return _jsonrpc_result(req_id, {"ok": True})
