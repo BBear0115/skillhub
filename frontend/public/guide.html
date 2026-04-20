@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SkillHub Guide</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f3efe6;
+        --ink: #16211d;
+        --panel: rgba(255, 251, 245, 0.9);
+        --line: rgba(22, 33, 29, 0.12);
+        --accent: #0c7c59;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "Noto Sans", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(217, 93, 57, 0.18), transparent 28%),
+          radial-gradient(circle at top right, rgba(12, 124, 89, 0.18), transparent 30%),
+          linear-gradient(135deg, #f4efe4 0%, #efe6d7 100%);
+        color: var(--ink);
+      }
+
+      main {
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 40px 20px 72px;
+      }
+
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        padding: 24px;
+        margin-bottom: 18px;
+        box-shadow: 0 20px 50px rgba(18, 34, 28, 0.08);
+      }
+
+      h1, h2, h3 { margin-top: 0; }
+      .eyebrow {
+        display: inline-block;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        font-size: 12px;
+        color: var(--accent);
+      }
+
+      code, pre {
+        background: #13201c;
+        color: #eef7f1;
+        border-radius: 12px;
+      }
+
+      code { padding: 3px 6px; }
+      pre {
+        padding: 14px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+      }
+
+      ul, ol { padding-left: 20px; }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="eyebrow">SkillHub Docs</span>
+      <h1>SkillHub Guide</h1>
+      <p>SkillHub is an open-source skill management and MCP gateway for individuals, teams, and agents.</p>
+
+      <section>
+        <h2>1. Basic Flow</h2>
+        <ol>
+          <li>Register an account and receive a personal workspace automatically.</li>
+          <li>Create inline skills or upload ZIP skill packages in your personal space.</li>
+          <li>Create a team or request access to an existing team for collaboration.</li>
+          <li>Team admins decide which skills are shared, and members decide which shared skills they want to use.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>2. Team Collaboration Model</h2>
+        <ul>
+          <li>Team admins create, upload, import, and delete team skills.</li>
+          <li>Team members discover and call only the skills exposed to them.</li>
+          <li>Each member can keep a smaller personal selection from the available team skills.</li>
+          <li>Each workspace can issue an API key for agent integration.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>3. Two MCP Entry Modes</h2>
+        <h3>Single skill endpoint</h3>
+        <p>Use this when the caller already knows which skill should be invoked:</p>
+        <pre>/mcp/{workspace_id}/{skill_id}</pre>
+
+        <h3>Workspace aggregator endpoint</h3>
+        <p>Use this when the caller needs to discover available skills first:</p>
+        <pre>/mcp/workspaces/{workspace_id}</pre>
+
+        <p>Recommended flow:</p>
+        <pre>{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {}
+}</pre>
+        <p>Then call <code>skills_list</code>, <code>skill_tools</code>, and <code>skill_call</code>.</p>
+      </section>
+
+      <section>
+        <h2>4. Ways to Add Skills</h2>
+        <ul>
+          <li>Inline skills for quick fixed-response tools.</li>
+          <li>ZIP skills for packaged skill implementations.</li>
+          <li>Repository skills for archives that include <code>marketplace.json</code>.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>5. Authentication</h2>
+        <p>SkillHub supports two credentials:</p>
+        <ul>
+          <li>Bearer token from user login</li>
+          <li>Workspace API key</li>
+        </ul>
+        <pre>Authorization: Bearer &lt;token-or-api-key&gt;</pre>
+      </section>
+
+      <section>
+        <h2>6. More Information</h2>
+        <p>See the repository root <code>README.md</code> for installation, deployment, and API details.</p>
+      </section>
+    </main>
+  </body>
+  </html>

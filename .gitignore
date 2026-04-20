@@ -1,0 +1,46 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/.venv/
+backend/*.egg-info/
+backend/.pytest_tmp/
+backend/pytest-cache-files-*/
+backend/skillhub-tests-*/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Local runtime data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+runtime_check.*
+backend/runtime-storage/
+backend/test_storage/
+backend/storage/
+
+# Env
+.env
+.env.local
+frontend/.env
+frontend/.env.local
+backend/.env
+backend/.env.local
+
+# Local artifacts
+*.log
+waza.zip

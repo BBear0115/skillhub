@@ -1,0 +1,25 @@
+{
+  "name": "Echo Skill",
+  "description": "A minimal python_package skill for SkillHub uploads.",
+  "visibility": "private",
+  "handler": {
+    "type": "python_package",
+    "entrypoint": "main.py:handle_tool"
+  },
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo a text field back to the caller.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to echo"
+          }
+        },
+        "required": ["text"]
+      }
+    }
+  ]
+}
