@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 from urllib.parse import urlparse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,11 +9,19 @@ from app.database import init_db
 from app.routers import auth, users, teams, workspaces, skills, tools, mcp
 from app.services.skill_packages import ensure_storage_root
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    ensure_storage_root()
+    storage_root = ensure_storage_root()
+    logger.info(
+        "SkillHub startup config: database_url=%s storage_root=%s frontend_url=%s",
+        settings.database_url,
+        storage_root,
+        settings.frontend_url,
+    )
     yield
 
 

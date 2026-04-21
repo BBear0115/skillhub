@@ -78,47 +78,16 @@ def build_tools_list(tools: list[Tool]) -> dict[str, Any]:
     return {"tools": tools}
 
 
-def build_workspace_tools_list() -> dict[str, Any]:
-    return {
-        "tools": [
-            {
-                "name": "skills_list",
-                "description": "List every skill currently available in this workspace, including each skill's tools and MCP endpoint.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "skill_tools",
-                "description": "Show the tools exposed by one skill in this workspace.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "skill_id": {"type": "integer"},
-                        "skill_name": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "skill_call",
-                "description": "Call a tool from one skill through the workspace aggregator.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "skill_id": {"type": "integer"},
-                        "skill_name": {"type": "string"},
-                        "tool_name": {"type": "string"},
-                        "arguments": {"type": "object"},
-                    },
-                    "required": ["tool_name"],
-                    "additionalProperties": False,
-                },
-            },
-        ]
-    }
+def build_workspace_tools_list(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"tools": tools}
+
+
+def build_resources_list(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"resources": resources}
+
+
+def build_resource_read_result(uri: str, text: str, mime_type: str = "text/markdown") -> dict[str, Any]:
+    return {"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
 
 
 def build_tool_result(result: dict) -> dict[str, Any]:

@@ -76,7 +76,7 @@
         <h2>1. Basic Flow</h2>
         <ol>
           <li>Register an account and receive a personal workspace automatically.</li>
-          <li>Create inline skills or upload ZIP skill packages in your personal space.</li>
+          <li>Upload ZIP skill packages in your personal space.</li>
           <li>Create a team or request access to an existing team for collaboration.</li>
           <li>Team admins decide which skills are shared, and members decide which shared skills they want to use.</li>
         </ol>
@@ -95,11 +95,11 @@
       <section>
         <h2>3. Two MCP Entry Modes</h2>
         <h3>Single skill endpoint</h3>
-        <p>Use this when the caller already knows which skill should be invoked:</p>
+        <p>Use this only for direct troubleshooting or skill-level isolation:</p>
         <pre>/mcp/{workspace_id}/{skill_id}</pre>
 
         <h3>Workspace aggregator endpoint</h3>
-        <p>Use this when the caller needs to discover available skills first:</p>
+        <p>This is the recommended agent entry point. It exposes the real callable tools for the current workspace and keeps execution on the backend server:</p>
         <pre>/mcp/workspaces/{workspace_id}</pre>
 
         <p>Recommended flow:</p>
@@ -109,15 +109,14 @@
   "method": "initialize",
   "params": {}
 }</pre>
-        <p>Then call <code>skills_list</code>, <code>skill_tools</code>, and <code>skill_call</code>.</p>
+        <p>Then call <code>tools/list</code> to get the flattened tool catalog, <code>resources/list</code> and <code>resources/read</code> to fetch <code>SKILL.md</code> instructions, and <code>tools/call</code> to execute the selected tool. Scripts always run on the backend server.</p>
       </section>
 
       <section>
         <h2>4. Ways to Add Skills</h2>
         <ul>
-          <li>Inline skills for quick fixed-response tools.</li>
           <li>ZIP skills for packaged skill implementations.</li>
-          <li>Repository skills for archives that include <code>marketplace.json</code>.</li>
+          <li>Repository skill collections for archives that include <code>skills-index.json</code> or <code>marketplace.json</code>.</li>
         </ul>
       </section>
 

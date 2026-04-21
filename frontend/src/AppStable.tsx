@@ -1,6 +1,13 @@
 ﻿
 import { Dispatch, FormEvent, SetStateAction, useEffect, useMemo, useState } from 'react'
-import { buildCurlExample, buildInitializeRequest, buildToolsCallRequest, parseToolArguments } from './lib/mcpClean'
+import {
+  buildCurlExample,
+  buildInitializeRequest,
+  buildResourcesListRequest,
+  buildToolsCallRequest,
+  buildToolsListRequest,
+  parseToolArguments,
+} from './lib/mcpClean'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? `${window.location.protocol}//${window.location.hostname}:8000`
 
@@ -31,6 +38,7 @@ type Skill = {
 type WorkspaceKey = { id: number; workspace_id: number; workspace_name: string; created_at: string; token?: string | null }
 type SkillAvailability = { id: number; name: string; description: string | null; enabled: boolean; tool_count: number }
 type SelectableSkill = { id: number; name: string; description: string | null; tool_count: number }
+type MpcTool = { name: string; description: string; inputSchema: Record<string, unknown> }
 
 function formatErrorDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail
@@ -70,6 +78,38 @@ async function apiFetch<T>(path: string, token: string | null, init?: RequestIni
   return response.json() as Promise<T>
 }
 
+function normalizeToolToken(value: string) {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+  return normalized || 'tool'
+}
+
+function workspaceToolAlias(skillId: number, toolName: string) {
+  return `skill_${skillId}_${normalizeToolToken(toolName)}`
+}
+
+async function mcpRequest(
+  endpoint: string,
+  token: string,
+  body: Record<string, unknown>,
+  sessionId?: string | null,
+) {
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+  })
+
+  const payload = (await response.json()) as { result?: unknown; error?: { message?: string } }
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error?.message ?? `MCP request failed: ${response.status}`)
+  }
+  return { payload, sessionId: response.headers.get('Mcp-Session-Id') }
+}
+
 export default function AppStable() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('skillhub-token'))
   const [authMode, setAuthMode] = useState<AuthMode>('login')
@@ -89,16 +129,13 @@ export default function AppStable() {
   const [teamName, setTeamName] = useState('')
   const [memberAccount, setMemberAccount] = useState('')
   const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member')
-  const [inlineSkillName, setInlineSkillName] = useState('')
-  const [inlineSkillDescription, setInlineSkillDescription] = useState('')
-  const [inlineToolName, setInlineToolName] = useState('respond')
-  const [inlineToolResponse, setInlineToolResponse] = useState('SkillHub is ready')
   const [uploadName, setUploadName] = useState('')
   const [uploadDescription, setUploadDescription] = useState('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [toolInputs, setToolInputs] = useState<Record<number, string>>({})
-  const [toolOutputs, setToolOutputs] = useState<Record<number, string>>({})
-  const [runningToolId, setRunningToolId] = useState<number | null>(null)
+  const [workspaceTools, setWorkspaceTools] = useState<MpcTool[]>([])
+  const [toolInputs, setToolInputs] = useState<Record<string, string>>({})
+  const [toolOutputs, setToolOutputs] = useState<Record<string, string>>({})
+  const [runningToolId, setRunningToolId] = useState<string | null>(null)
   const [availability, setAvailability] = useState<SkillAvailability[]>([])
   const [availabilitySelection, setAvailabilitySelection] = useState<number[]>([])
   const [selectableSkills, setSelectableSkills] = useState<SelectableSkill[]>([])
@@ -113,6 +150,7 @@ export default function AppStable() {
   const canManageCurrentWorkspace = selectedWorkspace?.type !== 'team' || isTeamAdmin
   const currentWorkspaceKey = useMemo(() => (selectedWorkspaceId ? workspaceKeys.find((item) => item.workspace_id === selectedWorkspaceId) ?? null : null), [workspaceKeys, selectedWorkspaceId])
   const workspaceAggregatorEndpoint = useMemo(() => (selectedWorkspaceId ? `/mcp/workspaces/${selectedWorkspaceId}` : null), [selectedWorkspaceId])
+  const workspaceToolMap = useMemo(() => new Map(workspaceTools.map((tool) => [tool.name, tool])), [workspaceTools])
 
   useEffect(() => {
     if (!token) {
@@ -123,6 +161,7 @@ export default function AppStable() {
       setPersonalSkills([])
       setMembers([])
       setJoinRequests([])
+      setWorkspaceTools([])
       return
     }
     void loadDashboard(token)
@@ -141,6 +180,37 @@ export default function AppStable() {
       setMemberSelection([])
     }
   }, [selectedWorkspace, token])
+
+  useEffect(() => {
+    if (!token || !selectedWorkspaceId) {
+      setWorkspaceTools([])
+      return
+    }
+    void loadWorkspaceAgentCatalog(selectedWorkspaceId, token)
+  }, [selectedWorkspaceId, token])
+
+  async function createWorkspaceSession(workspaceId: number, currentToken: string) {
+    const initialize = await mcpRequest(
+      `/mcp/workspaces/${workspaceId}`,
+      currentToken,
+      buildInitializeRequest(),
+    )
+    const sessionId = initialize.sessionId
+    if (!sessionId) throw new Error('MCP initialize did not return a session id')
+    return sessionId
+  }
+
+  async function loadWorkspaceAgentCatalog(workspaceId: number, currentToken: string) {
+    try {
+      const sessionId = await createWorkspaceSession(workspaceId, currentToken)
+      const toolsResponse = await mcpRequest(`/mcp/workspaces/${workspaceId}`, currentToken, buildToolsListRequest(), sessionId)
+      const toolsResult = toolsResponse.payload.result as { tools?: MpcTool[] } | undefined
+      setWorkspaceTools(toolsResult?.tools ?? [])
+    } catch (err) {
+      setWorkspaceTools([])
+      setError(err instanceof Error ? err.message : '加载 MCP 工具目录失败')
+    }
+  }
 
   async function loadDashboard(currentToken: string) {
     try {
@@ -163,6 +233,11 @@ export default function AppStable() {
       const personalWorkspace = workspaceList.find((item) => item.type === 'personal')
       setPersonalSkills(personalWorkspace ? await apiFetch<Skill[]>(`/workspaces/${personalWorkspace.id}/skills`, currentToken) : [])
       setSkills(nextWorkspaceId ? await apiFetch<Skill[]>(`/workspaces/${nextWorkspaceId}/skills`, currentToken) : [])
+      if (nextWorkspaceId) {
+        await loadWorkspaceAgentCatalog(nextWorkspaceId, currentToken)
+      } else {
+        setWorkspaceTools([])
+      }
       setStatus('控制台已同步')
     } catch (err) {
       localStorage.removeItem('skillhub-token')
@@ -322,44 +397,6 @@ export default function AppStable() {
     }
   }
 
-  async function handleCreateInlineSkill(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!token || !selectedWorkspaceId || !inlineSkillName.trim() || !inlineToolName.trim()) return
-    try {
-      await apiFetch<Skill>(`/workspaces/${selectedWorkspaceId}/skills`, token, {
-        method: 'POST',
-        body: JSON.stringify({
-          name: inlineSkillName.trim(),
-          description: inlineSkillDescription.trim() || null,
-          handler_config: {
-            type: 'inline',
-            responses: {
-              [inlineToolName.trim()]: inlineToolResponse,
-            },
-          },
-          tools: [
-            {
-              name: inlineToolName.trim(),
-              description: 'Inline response tool',
-              input_schema: {
-                type: 'object',
-                additionalProperties: true,
-              },
-            },
-          ],
-        }),
-      })
-      setInlineSkillName('')
-      setInlineSkillDescription('')
-      setInlineToolName('respond')
-      setInlineToolResponse('SkillHub is ready')
-      await loadDashboard(token)
-      setStatus('Inline Skill 已创建')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '创建 Inline Skill 失败')
-    }
-  }
-
   async function handleCopySkillToCurrent(skill: Skill) {
     if (!token || !selectedWorkspaceId) return
     try {
@@ -410,29 +447,22 @@ export default function AppStable() {
   }
 
   async function handleRunTool(skill: Skill, tool: ToolDefinition) {
-    if (!token) return
+    if (!token || !selectedWorkspaceId) return
+    const toolAlias = workspaceToolAlias(skill.id, tool.name)
     try {
-      setRunningToolId(tool.id)
-      const args = parseToolArguments(toolInputs[tool.id] ?? '{}')
-      const initializeResponse = await fetch(`${API_BASE_URL}${skill.mcp_endpoint}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildInitializeRequest()),
-      })
-      if (!initializeResponse.ok) throw new Error((await initializeResponse.text()) || 'MCP initialize 失败')
-      const sessionId = initializeResponse.headers.get('Mcp-Session-Id')
-      if (!sessionId) throw new Error('MCP initialize 没有返回 Session ID')
-      const callResponse = await fetch(`${API_BASE_URL}${skill.mcp_endpoint}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Mcp-Session-Id': sessionId },
-        body: JSON.stringify(buildToolsCallRequest(tool.name, args)),
-      })
-      const callData = (await callResponse.json()) as { result?: unknown; error?: { message?: string } }
-      if (!callResponse.ok || callData.error) throw new Error(callData.error?.message ?? 'MCP tools/call 失败')
-      setToolOutputs((current) => ({ ...current, [tool.id]: JSON.stringify(callData.result, null, 2) }))
-      setStatus(`已调用 ${tool.name}`)
+      setRunningToolId(toolAlias)
+      const args = parseToolArguments(toolInputs[toolAlias] ?? '{}')
+      const sessionId = await createWorkspaceSession(selectedWorkspaceId, token)
+      const callResponse = await mcpRequest(
+        `/mcp/workspaces/${selectedWorkspaceId}`,
+        token,
+        buildToolsCallRequest(toolAlias, args),
+        sessionId,
+      )
+      setToolOutputs((current) => ({ ...current, [toolAlias]: JSON.stringify(callResponse.payload.result, null, 2) }))
+      setStatus(`已通过工作区 MCP 调用 ${toolAlias}`)
     } catch (err) {
-      setToolOutputs((current) => ({ ...current, [tool.id]: err instanceof Error ? err.message : '工具调用失败' }))
+      setToolOutputs((current) => ({ ...current, [toolAlias]: err instanceof Error ? err.message : '工具调用失败' }))
     } finally {
       setRunningToolId(null)
     }
@@ -457,7 +487,7 @@ export default function AppStable() {
             <span className="eyebrow">SkillHub</span>
             <h1>开源的团队 Skill 管理与 MCP 网关</h1>
             <p>统一管理个人 Skill、团队 Skill 和可被 agent 调用的工具入口。</p>
-            <p>支持 ZIP 导入、inline Skill、团队权限控制、成员按需启用 Skill，以及单 Skill 与工作区级 MCP 接口。</p>
+            <p>支持 ZIP 导入、团队权限控制、成员按需启用 Skill，以及单 Skill 与工作区级 MCP 接口。</p>
             <p><a className="doc-link" href="/guide.html" target="_blank" rel="noreferrer">查看使用文档</a></p>
           </div>
           <form className="auth-card" onSubmit={handleAuthSubmit}>
@@ -637,30 +667,41 @@ export default function AppStable() {
         ) : null}
 
         <section className="panel panel-wide">
-          <div className="section-head"><div><span className="eyebrow">聚合器</span><h3>工作区 MCP 聚合入口</h3></div></div>
+          <div className="section-head"><div><span className="eyebrow">聚合器</span><h3>Agent 工作区 MCP 入口</h3></div></div>
           <div className="mcp-block">
             <strong>工作区 endpoint</strong>
             <code>{workspaceAggregatorEndpoint ? `${API_BASE_URL}${workspaceAggregatorEndpoint}` : '请先选择工作区'}</code>
             <strong>初始化请求</strong>
             <pre>{JSON.stringify(buildInitializeRequest(), null, 2)}</pre>
-            <strong>发现当前 Skill</strong>
-            <pre>{JSON.stringify(buildToolsCallRequest('skills_list', {}), null, 2)}</pre>
+            <strong>列出当前可调用工具</strong>
+            <pre>{JSON.stringify(buildToolsListRequest(), null, 2)}</pre>
+            <strong>列出 Skill 说明资源</strong>
+            <pre>{JSON.stringify(buildResourcesListRequest(), null, 2)}</pre>
+            <p className="muted">agent 应直接使用工作区聚合器返回的扁平工具名，并通过 resources 读取 SKILL.md 说明。实际脚本执行全部留在后端。</p>
+          </div>
+        </section>
+
+        <section className="panel panel-wide">
+          <div className="section-head"><div><span className="eyebrow">Agent 目录</span><h3>当前工作区暴露给 agent 的 Skill 列表</h3></div></div>
+          <div className="card-grid skill-grid">
+            {skills.map((skill) => (
+              <article key={skill.id} className="card skill-card">
+                <div className="skill-header">
+                  <div>
+                    <h4>{skill.name}</h4>
+                    <p>{skill.description ?? '暂无描述'}</p>
+                  </div>
+                  <span className={`visibility ${skill.visibility}`}>{skill.visibility}</span>
+                </div>
+                <span className="key-meta">{skill.tools.length} 个工具</span>
+              </article>
+            ))}
+            {skills.length === 0 ? <p className="muted">当前工作区还没有暴露给 agent 的 Skill。</p> : null}
           </div>
         </section>
 
         {canManageCurrentWorkspace ? (
           <>
-            <section className="panel">
-              <div className="section-head"><div><span className="eyebrow">快速创建</span><h3>创建 Inline Skill</h3></div></div>
-              <form className="stack-form" onSubmit={handleCreateInlineSkill}>
-                <label>Skill 名称<input value={inlineSkillName} onChange={(event) => setInlineSkillName(event.target.value)} placeholder="例如：Team FAQ" /></label>
-                <label>Skill 描述<textarea value={inlineSkillDescription} onChange={(event) => setInlineSkillDescription(event.target.value)} rows={3} placeholder="说明这个 Skill 适合处理什么问题" /></label>
-                <label>默认 Tool 名称<input value={inlineToolName} onChange={(event) => setInlineToolName(event.target.value)} placeholder="例如：answer" /></label>
-                <label>默认返回内容<textarea value={inlineToolResponse} onChange={(event) => setInlineToolResponse(event.target.value)} rows={4} placeholder="输入这个 inline tool 返回的内容" /></label>
-                <button className="primary-button" type="submit">创建 Inline Skill</button>
-              </form>
-            </section>
-
             <section className="panel">
               <div className="section-head"><div><span className="eyebrow">上传</span><h3>上传 Skill ZIP</h3></div></div>
               <form className="stack-form" onSubmit={handleUploadSkill}>
@@ -702,20 +743,30 @@ export default function AppStable() {
                 <div className="skill-header"><div><h4>{skill.name}</h4><p>{skill.description ?? '暂无描述'}</p></div></div>
                 <div className="tool-tags">{skill.tools.map((tool) => <span key={tool.id}>{tool.name}</span>)}</div>
                 <div className="mcp-block">
-                  <strong>Skill MCP endpoint</strong>
-                  <code>{`${API_BASE_URL}${skill.mcp_endpoint}`}</code>
-                  <pre>{buildCurlExample(API_BASE_URL, skill.mcp_endpoint)}</pre>
+                  <strong>Agent 使用入口</strong>
+                  <code>{workspaceAggregatorEndpoint ? `${API_BASE_URL}${workspaceAggregatorEndpoint}` : '请先选择工作区'}</code>
+                  <pre>{workspaceAggregatorEndpoint ? buildCurlExample(API_BASE_URL, workspaceAggregatorEndpoint) : '请先选择工作区'}</pre>
+                  <p className="muted">该 Skill 的工具通过工作区聚合器暴露给 agent。后端负责脚本执行与结果返回。</p>
                 </div>
                 <details className="tool-collapse">
-                  <summary>展开 Skill 测试与调用</summary>
+                  <summary>展开通过工作区 MCP 的测试与调用</summary>
                   <div className="tool-collapse-body">
                     {skill.tools.map((tool) => (
-                      <div key={tool.id} className="tool-tester">
-                        <div className="tool-tester-head"><strong>测试 {tool.name}</strong><span>{tool.description ?? '暂无描述'}</span></div>
-                        <textarea rows={4} value={toolInputs[tool.id] ?? '{}'} onChange={(event) => setToolInputs((current) => ({ ...current, [tool.id]: event.target.value }))} placeholder='{"mode":"summary"}' />
-                        <button className="secondary-button" onClick={() => void handleRunTool(skill, tool)} disabled={runningToolId === tool.id}>{runningToolId === tool.id ? '调用中...' : '通过 MCP 调用'}</button>
-                        <pre>{toolOutputs[tool.id] ?? '调用结果会显示在这里。'}</pre>
-                      </div>
+                      (() => {
+                        const alias = workspaceToolAlias(skill.id, tool.name)
+                        const exposedTool = workspaceToolMap.get(alias)
+                        return (
+                          <div key={tool.id} className="tool-tester">
+                            <div className="tool-tester-head"><strong>测试 {alias}</strong><span>{tool.description ?? '暂无描述'}</span></div>
+                            <p className="muted">agent 工具名：{alias}</p>
+                            <textarea rows={4} value={toolInputs[alias] ?? '{}'} onChange={(event) => setToolInputs((current) => ({ ...current, [alias]: event.target.value }))} placeholder='{"text":"hello"}' />
+                            <button className="secondary-button" onClick={() => void handleRunTool(skill, tool)} disabled={runningToolId === alias || !exposedTool}>
+                              {runningToolId === alias ? '调用中...' : exposedTool ? '通过工作区 MCP 调用' : '当前对 agent 不可见'}
+                            </button>
+                            <pre>{toolOutputs[alias] ?? '调用结果会显示在这里。'}</pre>
+                          </div>
+                        )
+                      })()
                     ))}
                   </div>
                 </details>

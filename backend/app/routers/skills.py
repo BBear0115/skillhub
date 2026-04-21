@@ -1,5 +1,6 @@
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from app.services.skill_packages import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class SkillCreate(BaseModel):
@@ -63,6 +65,17 @@ class SkillAvailabilityUpdate(BaseModel):
     enabled_skill_ids: list[int]
 
 
+def _public_handler_config(handler_config: dict[str, Any] | None) -> dict[str, Any]:
+    handler = handler_config or {}
+    return {
+        "type": handler.get("type", "unknown"),
+        "backend_managed": True,
+        "docs_available": bool(handler.get("doc_path"))
+        or bool(handler.get("doc_uri"))
+        or bool(handler.get("plugins")),
+    }
+
+
 def _build_skill_response(skill: Skill) -> SkillResponse:
     tools = [
         {
@@ -80,7 +93,7 @@ def _build_skill_response(skill: Skill) -> SkillResponse:
         description=skill.description,
         visibility=skill.visibility,
         enabled=skill.enabled,
-        handler_config=skill.handler_config or {},
+        handler_config=_public_handler_config(skill.handler_config),
         tools=tools,
         mcp_endpoint=f"/mcp/{skill.workspace_id}/{skill.id}",
     )
@@ -141,24 +154,10 @@ def _get_workspace_membership(session, workspace: Workspace, user_id: int) -> Te
 async def create_skill(workspace_id: int, data: SkillCreate, session: SessionDep, user: CurrentUserDep):
     if not await can_manage_workspace(user, workspace_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-    skill = Skill(
-        workspace_id=workspace_id,
-        name=data.name,
-        description=data.description,
-        visibility="private",
-        handler_config=data.handler_config or {},
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Inline skill creation has been removed. Upload a ZIP package instead.",
     )
-    session.add(skill)
-    session.commit()
-    session.refresh(skill)
-
-    if data.tools:
-        _replace_skill_tools(session, skill, data.tools)
-        session.commit()
-        session.refresh(skill)
-
-    return _build_skill_response(skill)
 
 
 @router.post("/workspaces/{workspace_id}/skills/upload", response_model=SkillResponse)
@@ -192,6 +191,9 @@ async def upload_skill_package(
     extracted_dir = skill_dir / "package"
 
     try:
+        if skill_dir.exists():
+            logger.warning("Skill storage already exists for new upload, cleaning stale directory: skill_id=%s path=%s", skill.id, skill_dir)
+            cleanup_skill_storage(skill.id)
         await save_upload_to_disk(package, archive_path)
         package_data = extract_package_archive(archive_path, extracted_dir)
         manifest = package_data["manifest"]
@@ -208,6 +210,9 @@ async def upload_skill_package(
                     detail="python_package handler requires entrypoint in skill.json",
                 )
             final_handler["package_dir"] = str(package_root)
+        skill_doc_path = package_root / "SKILL.md"
+        if skill_doc_path.exists():
+            final_handler["doc_path"] = str(skill_doc_path)
 
         skill.name = name or manifest.get("name") or skill.name
         skill.description = description if description is not None else manifest.get("description")
@@ -222,9 +227,20 @@ async def upload_skill_package(
         session.refresh(skill)
         return _build_skill_response(skill)
     except Exception:
+        logger.exception(
+            "Skill upload failed: workspace_id=%s skill_id=%s filename=%s archive_path=%s extracted_dir=%s",
+            workspace_id,
+            skill.id,
+            package.filename,
+            archive_path,
+            extracted_dir,
+        )
         session.delete(skill)
         session.commit()
-        cleanup_skill_storage(skill.id)
+        try:
+            cleanup_skill_storage(skill.id)
+        except OSError:
+            pass
         raise
 
 
@@ -295,6 +311,9 @@ def _rewrite_handler_paths(handler_config: dict[str, Any], rewrites: dict[str, s
             payload["package_dir"] = new
         if payload.get("root_dir") == old:
             payload["root_dir"] = new
+        doc_path = payload.get("doc_path")
+        if isinstance(doc_path, str) and doc_path.startswith(old):
+            payload["doc_path"] = doc_path.replace(old, new, 1)
         plugins = payload.get("plugins")
         if isinstance(plugins, dict):
             for plugin in plugins.values():
