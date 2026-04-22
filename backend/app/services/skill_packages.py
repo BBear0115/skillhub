@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import stat
 import shutil
 from pathlib import Path
 from typing import Any
@@ -17,14 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 def _handle_remove_readonly(func, path, exc_info):
-    os.chmod(path, 0o700)
-    func(path)
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        func(path)
+    except OSError:
+        logger.warning("Failed to remove path during cleanup: %s", path, exc_info=True)
 
 
 def remove_tree(target: Path) -> None:
     if target.exists():
         logger.info("Removing tree: %s", target)
-        shutil.rmtree(target, onerror=_handle_remove_readonly)
+        try:
+            shutil.rmtree(target, onerror=_handle_remove_readonly)
+        except OSError:
+            logger.warning("Failed to fully remove tree: %s", target, exc_info=True)
 
 
 def ensure_storage_root() -> Path:
@@ -117,14 +124,18 @@ def _has_direct_package_metadata(root_dir: Path) -> bool:
     return any((root_dir / name).exists() for name in MANIFEST_NAMES) or (root_dir / "marketplace.json").exists()
 
 
+def _has_implicit_skill_layout(root_dir: Path) -> bool:
+    return (root_dir / "SKILL.md").exists()
+
+
 def _resolve_archive_root(extracted_dir: Path) -> Path:
     children = [child for child in extracted_dir.iterdir() if child.name != "__MACOSX"]
     if len(children) == 1 and children[0].is_dir():
         child = children[0]
-        if _has_direct_package_metadata(child) or _find_marketplace_manifest(child):
+        if _has_direct_package_metadata(child) or _find_marketplace_manifest(child) or _has_implicit_skill_layout(child):
             return child
 
-    if _has_direct_package_metadata(extracted_dir) or _find_marketplace_manifest(extracted_dir):
+    if _has_direct_package_metadata(extracted_dir) or _find_marketplace_manifest(extracted_dir) or _has_implicit_skill_layout(extracted_dir):
         return extracted_dir
     return extracted_dir
 
@@ -142,6 +153,18 @@ def _read_frontmatter_description(skill_doc: Path) -> str | None:
             break
         if line.lower().startswith("description:"):
             return line.split(":", 1)[1].strip().strip('"')
+    return None
+
+
+def _read_skill_doc_title(skill_doc: Path) -> str | None:
+    try:
+        text = skill_doc.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
     return None
 
 
@@ -489,6 +512,60 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
     }
 
 
+def _build_implicit_skill_import(root_dir: Path) -> dict[str, Any]:
+    skill_doc = root_dir / "SKILL.md"
+    if not skill_doc.exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded ZIP must contain skill.json/skillhub.json, or marketplace.json for a skill repository",
+        )
+
+    script_paths = (
+        sorted(
+            (path for path in (root_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
+            key=lambda path: (0 if path.suffix == ".py" else 1, path.name),
+        )
+        if (root_dir / "scripts").exists()
+        else []
+    )
+    scripts = [_inspect_script(script_path) for script_path in script_paths]
+    default_script = _choose_default_script(scripts) if scripts else None
+    skill_name = _read_skill_doc_title(skill_doc) or root_dir.name
+    description = _read_frontmatter_description(skill_doc) or f"Imported skill from {root_dir.name}"
+
+    plugin = {
+        "name": skill_name,
+        "description": description,
+        "source": str(root_dir),
+        "source_relative": ".",
+        "skill_doc": str(skill_doc),
+        "skill_doc_relative": "SKILL.md",
+        "homepage": None,
+        "version": None,
+        "category": None,
+        "scripts": scripts,
+        "default_script": default_script["name"] if default_script else None,
+        "default_mode": default_script["default_mode"] if default_script else "docs_only",
+        "doc_only": not scripts,
+    }
+
+    return {
+        "kind": "marketplace_repo",
+        "manifest": {
+            "name": skill_name,
+            "description": description,
+            "visibility": "private",
+            "handler": {
+                "type": "marketplace_repo",
+                "root_dir": str(root_dir),
+                "plugins": {skill_name: plugin},
+            },
+            "tools": [_build_marketplace_plugin_tool(plugin, default_script)],
+        },
+        "root_dir": root_dir,
+    }
+
+
 def _build_single_skill_import(root_dir: Path) -> dict[str, Any]:
     for manifest_name in MANIFEST_NAMES:
         manifest_path = root_dir / manifest_name
@@ -528,6 +605,10 @@ def extract_package_archive(archive_path: Path, target_dir: Path) -> dict[str, A
     marketplace_path = _find_marketplace_manifest(root_dir)
     if marketplace_path is not None:
         return _build_marketplace_repo_import(root_dir, marketplace_path)
+    if any((root_dir / manifest_name).exists() for manifest_name in MANIFEST_NAMES):
+        return _build_single_skill_import(root_dir)
+    if _has_implicit_skill_layout(root_dir):
+        return _build_implicit_skill_import(root_dir)
     return _build_single_skill_import(root_dir)
 
 

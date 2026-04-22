@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import re
 from urllib.parse import urlparse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,9 +42,16 @@ def _build_allowed_origins() -> list[str]:
         origins.add(f"{parsed.scheme}://127.0.0.1:{parsed.port}")
     return sorted(origins)
 
+
+def _build_allowed_origin_regex() -> str:
+    # Allow common private-network/dev origins so the frontend can be opened
+    # directly from a LAN IP without having to rewrite env config first.
+    return r"^https?://(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})(:\d+)?$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_build_allowed_origins(),
+    allow_origin_regex=_build_allowed_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

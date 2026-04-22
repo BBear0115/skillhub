@@ -193,7 +193,10 @@ async def upload_skill_package(
     try:
         if skill_dir.exists():
             logger.warning("Skill storage already exists for new upload, cleaning stale directory: skill_id=%s path=%s", skill.id, skill_dir)
-            cleanup_skill_storage(skill.id)
+            try:
+                cleanup_skill_storage(skill.id)
+            except OSError:
+                logger.warning("Failed to cleanup stale skill storage before upload: skill_id=%s path=%s", skill.id, skill_dir, exc_info=True)
         await save_upload_to_disk(package, archive_path)
         package_data = extract_package_archive(archive_path, extracted_dir)
         manifest = package_data["manifest"]
@@ -240,7 +243,7 @@ async def upload_skill_package(
         try:
             cleanup_skill_storage(skill.id)
         except OSError:
-            pass
+            logger.warning("Failed to cleanup skill storage after upload failure: skill_id=%s", skill.id, exc_info=True)
         raise
 
 
@@ -298,9 +301,15 @@ async def delete_skill(skill_id: int, session: SessionDep, user: CurrentUserDep)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Skill not found")
     if not await can_manage_workspace(user, skill.workspace_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    tools = session.exec(select(Tool).where(Tool.skill_id == skill_id)).all()
+    for tool in tools:
+        session.delete(tool)
     session.delete(skill)
     session.commit()
-    cleanup_skill_storage(skill_id)
+    try:
+        cleanup_skill_storage(skill_id)
+    except OSError:
+        logger.warning("Failed to cleanup storage for deleted skill: skill_id=%s", skill_id, exc_info=True)
     return {"ok": True}
 
 

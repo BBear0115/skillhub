@@ -14,6 +14,9 @@ import httpx
 from app.config import settings
 from app.models import Skill, Tool
 
+DEFAULT_EXEC_TIMEOUT_SECONDS = 30
+DNSMOS_EXEC_TIMEOUT_SECONDS = 300
+
 
 def _resolve_bash_executable() -> list[str] | None:
     if os.name != "nt":
@@ -205,6 +208,15 @@ def _cleanup_temp_input(temp_input_path: Path | None) -> None:
         pass
 
 
+def _resolve_repo_exec_timeout(plugin: dict[str, Any], script: dict[str, Any]) -> int | float:
+    for candidate in (script.get("timeout_seconds"), plugin.get("timeout_seconds")):
+        if isinstance(candidate, (int, float)) and candidate > 0:
+            return candidate
+    if script.get("name") == "dnsmos_batch_filter.py":
+        return DNSMOS_EXEC_TIMEOUT_SECONDS
+    return DEFAULT_EXEC_TIMEOUT_SECONDS
+
+
 async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, arguments: dict[str, Any]) -> dict:
     script = _resolve_repo_script(plugin, arguments)
     if script is None:
@@ -216,6 +228,7 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
         return {"content": [{"type": "text", "text": f"Script not found: {script.get('name')}"}], "isError": True}
 
     command, temp_input_path = _build_repo_exec_command(plugin, tool, script, arguments)
+    timeout_seconds = _resolve_repo_exec_timeout(plugin, script)
     try:
         completed = await asyncio.to_thread(
             subprocess.run,
@@ -223,11 +236,14 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
             cwd=str(plugin_root),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
         _cleanup_temp_input(temp_input_path)
-        return {"content": [{"type": "text", "text": f"Execution timed out: {script['name']}"}], "isError": True}
+        return {
+            "content": [{"type": "text", "text": f"Execution timed out after {timeout_seconds}s: {script['name']}"}],
+            "isError": True,
+        }
     except Exception as exc:
         _cleanup_temp_input(temp_input_path)
         return {"content": [{"type": "text", "text": f"Execution error: {exc}"}], "isError": True}
@@ -305,7 +321,7 @@ async def execute_tool(skill: Skill, tool: Tool, arguments: dict) -> dict:
         if not url:
             return {"content": [{"type": "text", "text": "Missing handler URL"}], "isError": True}
         headers = handler.get("headers", {})
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=DEFAULT_EXEC_TIMEOUT_SECONDS) as client:
             try:
                 resp = await client.post(url, json={"tool": tool.name, "arguments": arguments}, headers=headers)
                 resp.raise_for_status()
