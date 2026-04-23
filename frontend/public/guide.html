@@ -1,15 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SkillHub Guide</title>
+    <title>SkillHub 使用指南</title>
     <style>
       :root {
         color-scheme: light;
         --bg: #f3efe6;
         --ink: #16211d;
-        --panel: rgba(255, 251, 245, 0.9);
+        --panel: rgba(255, 251, 245, 0.92);
         --line: rgba(22, 33, 29, 0.12);
         --accent: #0c7c59;
       }
@@ -17,7 +17,7 @@
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        font-family: "Segoe UI", "Noto Sans", sans-serif;
+        font-family: "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
         background:
           radial-gradient(circle at top left, rgba(217, 93, 57, 0.18), transparent 28%),
           radial-gradient(circle at top right, rgba(12, 124, 89, 0.18), transparent 30%),
@@ -69,70 +69,77 @@
   <body>
     <main>
       <span class="eyebrow">SkillHub Docs</span>
-      <h1>SkillHub Guide</h1>
-      <p>SkillHub is an open-source skill management and MCP gateway for individuals, teams, and agents.</p>
+      <h1>SkillHub 使用指南</h1>
+      <p>SkillHub 将团队 Skill 管理拆成“候选版本导入、超级管理员审核、团队开放配置”三层职责。</p>
 
       <section>
-        <h2>1. Basic Flow</h2>
+        <h2>1. 基本流程</h2>
         <ol>
-          <li>Register an account and receive a personal workspace automatically.</li>
-          <li>Upload ZIP skill packages in your personal space.</li>
-          <li>Create a team or request access to an existing team for collaboration.</li>
-          <li>Team admins decide which skills are shared, and members decide which shared skills they want to use.</li>
+          <li>注册账号后，系统会自动创建个人空间。</li>
+          <li>团队成员可以把 ZIP 上传到团队空间，形成候选 SkillVersion。</li>
+          <li>超级管理员审核版本，决定是否允许进入 MCP。</li>
+          <li>团队管理员从已审核 Skill 中选择哪些对本团队 MCP 开放。</li>
         </ol>
       </section>
 
       <section>
-        <h2>2. Team Collaboration Model</h2>
+        <h2>2. 角色职责</h2>
         <ul>
-          <li>Team admins create, upload, import, and delete team skills.</li>
-          <li>Team members discover and call only the skills exposed to them.</li>
-          <li>Each member can keep a smaller personal selection from the available team skills.</li>
-          <li>Each workspace can issue an API key for agent integration.</li>
+          <li>超级管理员：启动审核工作台、下载 ZIP、查看部署信息、批准、拒绝、清空当前审核通过版本。</li>
+          <li>团队管理员：管理团队成员、审批加入请求、配置团队开放的已审核 Skill。</li>
+          <li>普通成员：上传 ZIP、下载 ZIP、查看 Skill 版本历史。</li>
         </ul>
       </section>
 
       <section>
-        <h2>3. Two MCP Entry Modes</h2>
-        <h3>Single skill endpoint</h3>
-        <p>Use this only for direct troubleshooting or skill-level isolation:</p>
+        <h2>3. 审核工作台</h2>
+        <p>点击“开始审核”后，后端会为该版本准备 review workbench，并提供以下能力：</p>
+        <ul>
+          <li>下载原始 ZIP 快照</li>
+          <li>查看解压后的部署目录</li>
+          <li>查看 handler、manifest、tool 列表等部署元信息</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>4. ZIP 导入规则</h2>
+        <ul>
+          <li>ZIP manifest 必须包含 <code>name</code>。</li>
+          <li>ZIP manifest 必须包含 <code>version</code>。</li>
+          <li>导入只会产生候选版本，不会自动进入 MCP。</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>5. MCP 可见规则</h2>
+        <pre>1. 调用者对 workspace 有访问权
+2. Skill 存在 current_approved_version_id
+3. 团队空间 exposure 已启用
+4. MCP 读取的是当前审核通过版本快照</pre>
+        <p>控制台只展示 MCP 入口信息，不再提供前端手动调试与连通测试面板。</p>
+      </section>
+
+      <section>
+        <h2>6. MCP 入口</h2>
+        <p>单 Skill 入口：</p>
         <pre>/mcp/{workspace_id}/{skill_id}</pre>
-
-        <h3>Workspace aggregator endpoint</h3>
-        <p>This is the recommended agent entry point. It exposes the real callable tools for the current workspace and keeps execution on the backend server:</p>
+        <p>工作区聚合入口：</p>
         <pre>/mcp/workspaces/{workspace_id}</pre>
-
-        <p>Recommended flow:</p>
-        <pre>{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "initialize",
-  "params": {}
-}</pre>
-        <p>Then call <code>tools/list</code> to get the flattened tool catalog, <code>resources/list</code> and <code>resources/read</code> to fetch <code>SKILL.md</code> instructions, and <code>tools/call</code> to execute the selected tool. Scripts always run on the backend server.</p>
       </section>
 
       <section>
-        <h2>4. Ways to Add Skills</h2>
+        <h2>7. 示例 Skill</h2>
+        <p>仓库中的 <code>examples/server-transfer-skill</code> 提供了三个可审核、可部署的示例工具：</p>
         <ul>
-          <li>ZIP skills for packaged skill implementations.</li>
-          <li>Repository skill collections for archives that include <code>skills-index.json</code> or <code>marketplace.json</code>.</li>
+          <li><code>stream_audio_to_server</code></li>
+          <li><code>stream_text_to_server</code></li>
+          <li><code>delete_server_streams</code></li>
         </ul>
       </section>
 
       <section>
-        <h2>5. Authentication</h2>
-        <p>SkillHub supports two credentials:</p>
-        <ul>
-          <li>Bearer token from user login</li>
-          <li>Workspace API key</li>
-        </ul>
-        <pre>Authorization: Bearer &lt;token-or-api-key&gt;</pre>
-      </section>
-
-      <section>
-        <h2>6. More Information</h2>
-        <p>See the repository root <code>README.md</code> for installation, deployment, and API details.</p>
+        <h2>8. 更多说明</h2>
+        <p>安装与环境变量说明请查看仓库根目录中的 <code>README.md</code> 和 <code>README.zh-CN.md</code>。</p>
       </section>
     </main>
   </body>

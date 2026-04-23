@@ -18,6 +18,10 @@ def _make_temp_dir() -> Path:
     return path
 
 
+def _dnsmos_zip_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "dnsmos-audio-filter (1).zip"
+
+
 def test_extract_package_archive_builds_exec_repo_manifest() -> None:
     tmp_root = _make_temp_dir()
     source_root = tmp_root / "source"
@@ -27,6 +31,7 @@ def test_extract_package_archive_builds_exec_repo_manifest() -> None:
             source_root / ".codex" / "skills-index.json",
             {
                 "name": "Demo skill repo",
+                "version": "1.0.0",
                 "description": "Repository with executable skills",
                 "skills": [
                     {
@@ -84,6 +89,7 @@ def test_extract_package_archive_builds_marketplace_repo_manifest() -> None:
             source_root / "marketplace.json",
             {
                 "name": "Docs Repo",
+                "version": "1.0.0",
                 "description": "Marketplace skill collection",
                 "plugins": [
                     {
@@ -127,6 +133,7 @@ def test_extract_package_archive_detects_shell_scripts_in_marketplace_repo() -> 
             source_root / "marketplace.json",
             {
                 "name": "Ops Marketplace",
+                "version": "1.0.0",
                 "plugins": [
                     {
                         "name": "health",
@@ -150,5 +157,33 @@ def test_extract_package_archive_detects_shell_scripts_in_marketplace_repo() -> 
         assert plugin["doc_only"] is False
         assert plugin["default_script"] == "collect-data.sh"
         assert plugin["default_mode"] == "no_args"
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_extract_package_archive_builds_implicit_marketplace_repo_for_dnsmos_zip() -> None:
+    tmp_root = _make_temp_dir()
+    try:
+        extracted = extract_package_archive(_dnsmos_zip_path(), tmp_root / "unzipped")
+
+        assert extracted["kind"] == "marketplace_repo"
+        manifest = extracted["manifest"]
+        assert manifest["name"] == "DNSMOS Audio Filter"
+        assert manifest["handler"]["type"] == "marketplace_repo"
+        assert len(manifest["tools"]) == 1
+
+        tool = manifest["tools"][0]
+        assert tool["name"] == "DNSMOS Audio Filter"
+        assert set(tool["inputSchema"]["properties"]) == {"script", "output_format", "options"}
+
+        plugin = manifest["handler"]["plugins"]["DNSMOS Audio Filter"]
+        assert plugin["default_script"] == "dnsmos_batch_filter.py"
+        assert plugin["default_mode"] == "no_args"
+        assert plugin["doc_only"] is False
+        assert plugin["skill_doc_relative"] == "SKILL.md"
+        assert Path(plugin["skill_doc"]).name == "SKILL.md"
+        assert Path(plugin["source"]).name == "dnsmos-audio-filter"
+        assert Path(plugin["source"]).joinpath("assets", "sig_bak_ovr.onnx").exists()
+        assert "default_prompt" not in json.dumps(plugin, ensure_ascii=False)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)

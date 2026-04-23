@@ -1,44 +1,87 @@
-﻿
-import { Dispatch, FormEvent, SetStateAction, useEffect, useMemo, useState } from 'react'
-import {
-  buildCurlExample,
-  buildInitializeRequest,
-  buildResourcesListRequest,
-  buildToolsCallRequest,
-  buildToolsListRequest,
-  parseToolArguments,
-} from './lib/mcpClean'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? `${window.location.protocol}//${window.location.hostname}:8000`
 
 type AuthMode = 'login' | 'register'
-type User = { id: number; account: string }
-type Workspace = { id: number; name: string; type: 'personal' | 'team'; owner_id: number; team_id: number | null }
-type Team = { id: number; name: string; owner_id: number; membership_role: 'admin' | 'member' | null; has_pending_request: boolean }
-type TeamMember = {
-  user_id: number
-  account: string
-  role: 'admin' | 'member'
-  skill_preferences: Record<string, boolean>
-  skill_preferences_configured: boolean
-}
-type JoinRequest = { id: number; team_id: number; team_name: string; user_id: number; account: string; status: string }
-type ToolDefinition = { id: number; name: string; description: string | null; input_schema: Record<string, unknown> }
+type ViewMode = 'workspace' | 'admin'
+type User = { id: number; account: string; is_super_admin: boolean }
+type Workspace = { id: number; name: string; type: 'personal' | 'team' | 'admin'; owner_id: number; team_id: number | null }
+type SkillVersionSummary = { id: number; version: string; status: string; deployed: boolean }
+type ToolSummary = { id: number; name: string; description: string | null; input_schema: Record<string, unknown> }
 type Skill = {
   id: number
   workspace_id: number
   name: string
   description: string | null
   visibility: string
-  enabled: boolean
-  handler_config: Record<string, unknown>
-  tools: ToolDefinition[]
   mcp_endpoint: string
+  current_approved_version_id: number | null
+  current_approved_version: SkillVersionSummary | null
+  deployed_version_id: number | null
+  deployed_version: SkillVersionSummary | null
+  mcp_ready: boolean
+  version_count: number
+  exposed_to_workspace: boolean | null
+  created_at: string
+  updated_at: string
 }
-type WorkspaceKey = { id: number; workspace_id: number; workspace_name: string; created_at: string; token?: string | null }
-type SkillAvailability = { id: number; name: string; description: string | null; enabled: boolean; tool_count: number }
-type SelectableSkill = { id: number; name: string; description: string | null; tool_count: number }
-type MpcTool = { name: string; description: string; inputSchema: Record<string, unknown> }
+type SkillVersion = {
+  id: number
+  skill_id: number
+  version: string
+  status: string
+  upload_filename: string | null
+  uploaded_by_account: string | null
+  package_download_url: string
+  tools: ToolSummary[]
+  is_current_approved: boolean
+  is_current_deployed: boolean
+  deployment_path: string | null
+  deploy_status: string
+  deploy_error: string | null
+  runtime_path: string | null
+  venv_path: string | null
+  dependency_manifest: Record<string, unknown>
+  published_mcp_endpoint_url: string | null
+  created_at: string
+  updated_at: string
+}
+type ReviewSkillVersion = SkillVersion & {
+  workspace_id: number
+  workspace_name: string
+  skill_name: string
+}
+type ReviewWorkbench = {
+  review_attempt_id: string
+  workbench_path: string
+  workbench_package_path: string | null
+  workbench_extracted_path: string | null
+  deployment_kind: string
+  deployment_entrypoint: string | null
+  deployment_ready: boolean
+  tool_count: number
+  manifest_data: Record<string, unknown>
+  handler_config: Record<string, unknown>
+  deployment_steps: string[]
+}
+type WorkspacePrompt = {
+  workspace_id: number
+  workspace_name: string
+  workspace_mcp_url: string
+  prompt_text: string
+  available_skills: Array<Record<string, unknown>>
+  global_tools: Array<Record<string, unknown>>
+}
+
+class ApiError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
 
 function formatErrorDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail
@@ -46,11 +89,11 @@ function formatErrorDetail(detail: unknown): string {
   if (detail && typeof detail === 'object') {
     const record = detail as Record<string, unknown>
     if (typeof record.detail !== 'undefined') return formatErrorDetail(record.detail)
-    if (typeof record.msg === 'string') return record.msg
     if (typeof record.message === 'string') return record.message
+    if (typeof record.msg === 'string') return record.msg
     return JSON.stringify(record)
   }
-  return '请求失败'
+  return 'Request failed'
 }
 
 async function apiFetch<T>(path: string, token: string | null, init?: RequestInit): Promise<T> {
@@ -69,45 +112,32 @@ async function apiFetch<T>(path: string, token: string | null, init?: RequestIni
       const data = await response.json()
       detail = formatErrorDetail(data.detail ?? data)
     } catch {
-      // ignore non-json error body
+      // ignore non-JSON errors
     }
-    throw new Error(detail)
+    throw new ApiError(response.status, detail)
   }
 
   if (response.status === 204) return null as T
   return response.json() as Promise<T>
 }
 
-function normalizeToolToken(value: string) {
-  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
-  return normalized || 'tool'
+function formatDate(value: string | null | undefined) {
+  if (!value) return 'None'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString()
 }
 
-function workspaceToolAlias(skillId: number, toolName: string) {
-  return `skill_${skillId}_${normalizeToolToken(toolName)}`
+function sortByCreatedAt<T extends { created_at: string }>(items: T[]) {
+  return [...items].sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
 }
 
-async function mcpRequest(
-  endpoint: string,
-  token: string,
-  body: Record<string, unknown>,
-  sessionId?: string | null,
-) {
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
-    },
-    body: JSON.stringify(body),
-  })
+function buildSkillMcpEndpoint(version: ReviewSkillVersion) {
+  return `${API_BASE_URL.replace(/\/$/, '')}/mcp/${version.workspace_id}/${version.skill_id}`
+}
 
-  const payload = (await response.json()) as { result?: unknown; error?: { message?: string } }
-  if (!response.ok || payload.error) {
-    throw new Error(payload.error?.message ?? `MCP request failed: ${response.status}`)
-  }
-  return { payload, sessionId: response.headers.get('Mcp-Session-Id') }
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text)
 }
 
 export default function AppStable() {
@@ -115,266 +145,127 @@ export default function AppStable() {
   const [authMode, setAuthMode] = useState<AuthMode>('login')
   const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
-  const [authenticating, setAuthenticating] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [teams, setTeams] = useState<Team[]>([])
-  const [discoverTeams, setDiscoverTeams] = useState<Team[]>([])
-  const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([])
-  const [skills, setSkills] = useState<Skill[]>([])
-  const [personalSkills, setPersonalSkills] = useState<Skill[]>([])
-  const [workspaceKeys, setWorkspaceKeys] = useState<WorkspaceKey[]>([])
-  const [members, setMembers] = useState<TeamMember[]>([])
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number | null>(null)
-  const [teamName, setTeamName] = useState('')
-  const [memberAccount, setMemberAccount] = useState('')
-  const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member')
+  const [viewMode, setViewMode] = useState<ViewMode>('workspace')
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [versionMap, setVersionMap] = useState<Record<number, SkillVersion[]>>({})
+  const [reviewVersions, setReviewVersions] = useState<ReviewSkillVersion[]>([])
+  const [reviewWorkbenches, setReviewWorkbenches] = useState<Record<number, ReviewWorkbench>>({})
+  const [workspacePrompt, setWorkspacePrompt] = useState<WorkspacePrompt | null>(null)
   const [uploadName, setUploadName] = useState('')
+  const [uploadVersion, setUploadVersion] = useState('')
   const [uploadDescription, setUploadDescription] = useState('')
+  const [uploadVisibility, setUploadVisibility] = useState<'private' | 'public'>('private')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [workspaceTools, setWorkspaceTools] = useState<MpcTool[]>([])
-  const [toolInputs, setToolInputs] = useState<Record<string, string>>({})
-  const [toolOutputs, setToolOutputs] = useState<Record<string, string>>({})
-  const [runningToolId, setRunningToolId] = useState<string | null>(null)
-  const [availability, setAvailability] = useState<SkillAvailability[]>([])
-  const [availabilitySelection, setAvailabilitySelection] = useState<number[]>([])
-  const [selectableSkills, setSelectableSkills] = useState<SelectableSkill[]>([])
-  const [memberSelection, setMemberSelection] = useState<number[]>([])
-  const [status, setStatus] = useState('准备就绪')
+  const [busyDownloadVersionId, setBusyDownloadVersionId] = useState<number | null>(null)
+  const [busyPrompt, setBusyPrompt] = useState(false)
+  const [status, setStatus] = useState('Ready')
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
 
-  const selectedWorkspace = useMemo(() => workspaces.find((item) => item.id === selectedWorkspaceId) ?? null, [selectedWorkspaceId, workspaces])
-  const activeTeam = useMemo(() => (selectedWorkspace?.team_id ? teams.find((item) => item.id === selectedWorkspace.team_id) ?? null : null), [selectedWorkspace, teams])
-  const currentTeamMembership = useMemo(() => (user ? members.find((item) => item.user_id === user.id) ?? null : null), [members, user])
-  const isTeamAdmin = currentTeamMembership?.role === 'admin'
-  const canManageCurrentWorkspace = selectedWorkspace?.type !== 'team' || isTeamAdmin
-  const currentWorkspaceKey = useMemo(() => (selectedWorkspaceId ? workspaceKeys.find((item) => item.workspace_id === selectedWorkspaceId) ?? null : null), [workspaceKeys, selectedWorkspaceId])
-  const workspaceAggregatorEndpoint = useMemo(() => (selectedWorkspaceId ? `/mcp/workspaces/${selectedWorkspaceId}` : null), [selectedWorkspaceId])
-  const workspaceToolMap = useMemo(() => new Map(workspaceTools.map((tool) => [tool.name, tool])), [workspaceTools])
+  const adminWorkspace = useMemo(() => workspaces.find((item) => item.type === 'admin') ?? null, [workspaces])
+  const userWorkspaces = useMemo(() => workspaces.filter((item) => item.type !== 'admin'), [workspaces])
+  const selectedWorkspace = useMemo(
+    () => userWorkspaces.find((item) => item.id === selectedWorkspaceId) ?? null,
+    [selectedWorkspaceId, userWorkspaces],
+  )
 
   useEffect(() => {
     if (!token) {
+      localStorage.removeItem('skillhub-token')
       setUser(null)
       setWorkspaces([])
-      setTeams([])
+      setSelectedWorkspaceId(null)
       setSkills([])
-      setPersonalSkills([])
-      setMembers([])
-      setJoinRequests([])
-      setWorkspaceTools([])
+      setVersionMap({})
+      setReviewVersions([])
+      setReviewWorkbenches({})
       return
     }
     void loadDashboard(token)
   }, [token])
 
   useEffect(() => {
-    if (!token || !selectedWorkspace) return
-    if (selectedWorkspace.type === 'team' && selectedWorkspace.team_id !== null) {
-      void loadTeamContext(selectedWorkspace.team_id, selectedWorkspace.id, token)
-    } else {
-      setMembers([])
-      setJoinRequests([])
-      setAvailability([])
-      setAvailabilitySelection([])
-      setSelectableSkills([])
-      setMemberSelection([])
-    }
-  }, [selectedWorkspace, token])
+    if (!token || !selectedWorkspaceId || viewMode !== 'workspace') return
+    void loadWorkspaceContext(selectedWorkspaceId, token)
+  }, [token, selectedWorkspaceId, viewMode])
 
   useEffect(() => {
-    if (!token || !selectedWorkspaceId) {
-      setWorkspaceTools([])
-      return
-    }
-    void loadWorkspaceAgentCatalog(selectedWorkspaceId, token)
-  }, [selectedWorkspaceId, token])
-
-  async function createWorkspaceSession(workspaceId: number, currentToken: string) {
-    const initialize = await mcpRequest(
-      `/mcp/workspaces/${workspaceId}`,
-      currentToken,
-      buildInitializeRequest(),
-    )
-    const sessionId = initialize.sessionId
-    if (!sessionId) throw new Error('MCP initialize did not return a session id')
-    return sessionId
-  }
-
-  async function loadWorkspaceAgentCatalog(workspaceId: number, currentToken: string) {
-    try {
-      const sessionId = await createWorkspaceSession(workspaceId, currentToken)
-      const toolsResponse = await mcpRequest(`/mcp/workspaces/${workspaceId}`, currentToken, buildToolsListRequest(), sessionId)
-      const toolsResult = toolsResponse.payload.result as { tools?: MpcTool[] } | undefined
-      setWorkspaceTools(toolsResult?.tools ?? [])
-    } catch (err) {
-      setWorkspaceTools([])
-      setError(err instanceof Error ? err.message : '加载 MCP 工具目录失败')
-    }
-  }
+    if (!token || !user?.is_super_admin) return
+    void loadReviewVersions(token)
+  }, [token, user?.is_super_admin])
 
   async function loadDashboard(currentToken: string) {
     try {
       setError(null)
-      setStatus('正在同步控制台')
-      const [me, workspaceList, teamList, discoverList, keyList] = await Promise.all([
+      setLoading(true)
+      const [me, workspaceList] = await Promise.all([
         apiFetch<User>('/users/me', currentToken),
         apiFetch<Workspace[]>('/workspaces', currentToken),
-        apiFetch<Team[]>('/teams', currentToken),
-        apiFetch<Team[]>('/teams/discover', currentToken),
-        apiFetch<WorkspaceKey[]>('/users/me/api-keys', currentToken),
       ])
+      const selectable = workspaceList.filter((item) => item.type !== 'admin')
       setUser(me)
       setWorkspaces(workspaceList)
-      setTeams(teamList)
-      setDiscoverTeams(discoverList)
-      setWorkspaceKeys(keyList)
-      const nextWorkspaceId = selectedWorkspaceId && workspaceList.some((item) => item.id === selectedWorkspaceId) ? selectedWorkspaceId : (workspaceList[0]?.id ?? null)
-      setSelectedWorkspaceId(nextWorkspaceId)
-      const personalWorkspace = workspaceList.find((item) => item.type === 'personal')
-      setPersonalSkills(personalWorkspace ? await apiFetch<Skill[]>(`/workspaces/${personalWorkspace.id}/skills`, currentToken) : [])
-      setSkills(nextWorkspaceId ? await apiFetch<Skill[]>(`/workspaces/${nextWorkspaceId}/skills`, currentToken) : [])
-      if (nextWorkspaceId) {
-        await loadWorkspaceAgentCatalog(nextWorkspaceId, currentToken)
-      } else {
-        setWorkspaceTools([])
-      }
-      setStatus('控制台已同步')
+      setSelectedWorkspaceId((current) => (current && selectable.some((item) => item.id === current) ? current : selectable[0]?.id ?? null))
+      setViewMode(me.is_super_admin ? 'admin' : 'workspace')
+      setStatus('Console synced')
     } catch (err) {
-      localStorage.removeItem('skillhub-token')
-      setToken(null)
-      setUser(null)
-      setError(err instanceof Error ? err.message : '加载控制台失败')
-      setStatus('同步失败')
+      setError(err instanceof Error ? err.message : 'Failed to load console')
+      if (err instanceof ApiError && err.status === 401) {
+        localStorage.removeItem('skillhub-token')
+        setToken(null)
+      }
+    } finally {
+      setLoading(false)
     }
   }
 
-  async function loadTeamContext(teamId: number, workspaceId: number, currentToken: string) {
-    const [teamMembers, mySkills, requests, openSkills, availableSkills] = await Promise.all([
-      apiFetch<TeamMember[]>(`/teams/${teamId}/members`, currentToken).catch(() => []),
-      apiFetch<{ enabled_skill_ids: number[] }>(`/teams/${teamId}/me/skills`, currentToken).catch(() => ({ enabled_skill_ids: [] })),
-      apiFetch<JoinRequest[]>(`/teams/${teamId}/join-requests`, currentToken).catch(() => []),
-      apiFetch<SkillAvailability[]>(`/workspaces/${workspaceId}/skill-availability`, currentToken).catch(() => []),
-      apiFetch<SelectableSkill[]>(`/teams/${teamId}/selectable-skills`, currentToken).catch(() => []),
-    ])
-    setMembers(teamMembers)
-    setJoinRequests(requests)
-    setAvailability(openSkills)
-    setAvailabilitySelection(openSkills.filter((item) => item.enabled).map((item) => item.id))
-    setSelectableSkills(availableSkills)
-    setMemberSelection(mySkills.enabled_skill_ids)
+  async function loadWorkspaceContext(workspaceId: number, currentToken: string) {
+    try {
+      setError(null)
+      const workspaceSkills = await apiFetch<Skill[]>(`/workspaces/${workspaceId}/skills`, currentToken)
+      const versions = await Promise.all(
+        workspaceSkills.map(async (skill) => [skill.id, sortByCreatedAt(await apiFetch<SkillVersion[]>(`/skills/${skill.id}/versions`, currentToken))] as const),
+      )
+      const nextMap: Record<number, SkillVersion[]> = {}
+      for (const [skillId, items] of versions) nextMap[skillId] = items
+      setSkills(workspaceSkills)
+      setVersionMap(nextMap)
+      setWorkspacePrompt(null)
+      setStatus(`Workspace synced: ${workspaceId}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load workspace')
+    }
   }
+
+  async function loadReviewVersions(currentToken: string) {
+    try {
+      const items = await apiFetch<ReviewSkillVersion[]>('/review/skill-versions', currentToken)
+      setReviewVersions(sortByCreatedAt(items))
+    } catch (err) {
+      setReviewVersions([])
+      if (user?.is_super_admin) setError(err instanceof Error ? err.message : 'Failed to load review queue')
+    }
+  }
+
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     try {
-      setAuthenticating(true)
       setError(null)
-      setStatus(authMode === 'login' ? '正在登录' : '正在注册')
+      setLoading(true)
       const data = await apiFetch<{ access_token: string }>(`/auth/${authMode}`, null, {
         method: 'POST',
         body: JSON.stringify({ account: account.trim(), password }),
       })
       localStorage.setItem('skillhub-token', data.access_token)
       setToken(data.access_token)
-      await loadDashboard(data.access_token)
       setPassword('')
-      setStatus(authMode === 'login' ? '登录成功' : '注册成功')
     } catch (err) {
-      localStorage.removeItem('skillhub-token')
-      setToken(null)
-      setUser(null)
-      setError(err instanceof Error ? err.message : '认证失败')
-      setStatus('认证失败')
+      setError(err instanceof Error ? err.message : 'Authentication failed')
     } finally {
-      setAuthenticating(false)
-    }
-  }
-
-  async function handleWorkspaceChange(workspaceId: number) {
-    if (!token) return
-    try {
-      setSelectedWorkspaceId(workspaceId)
-      setSkills(await apiFetch<Skill[]>(`/workspaces/${workspaceId}/skills`, token))
-      setStatus('空间已切换')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '切换空间失败')
-    }
-  }
-
-  async function handleCreateTeam(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!token || !teamName.trim()) return
-    try {
-      setStatus('正在创建团队')
-      await apiFetch<Team>('/teams', token, { method: 'POST', body: JSON.stringify({ name: teamName.trim() }) })
-      setTeamName('')
-      await loadDashboard(token)
-      setStatus('团队已创建')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '创建团队失败')
-    }
-  }
-
-  async function handleRequestJoin(teamId: number) {
-    if (!token) return
-    try {
-      await apiFetch('/teams/join-requests', token, { method: 'POST', body: JSON.stringify({ team_id: teamId }) })
-      await loadDashboard(token)
-      setStatus('已提交加入申请')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '提交申请失败')
-    }
-  }
-
-  async function handleJoinDecision(teamId: number, requestId: number, approve: boolean) {
-    if (!token || !selectedWorkspaceId) return
-    try {
-      await apiFetch(`/teams/${teamId}/join-requests/${requestId}`, token, { method: 'POST', body: JSON.stringify({ approve }) })
-      await loadTeamContext(teamId, selectedWorkspaceId, token)
-      await loadDashboard(token)
-      setStatus(approve ? '已通过申请' : '已拒绝申请')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '处理申请失败')
-    }
-  }
-
-  async function handleAddMember(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!token || !selectedWorkspace?.team_id || !memberAccount.trim()) return
-    try {
-      await apiFetch(`/teams/${selectedWorkspace.team_id}/members`, token, {
-        method: 'POST',
-        body: JSON.stringify({ account: memberAccount.trim(), role: memberRole }),
-      })
-      setMemberAccount('')
-      await loadTeamContext(selectedWorkspace.team_id, selectedWorkspace.id, token)
-      setStatus('成员已加入团队')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '添加成员失败')
-    }
-  }
-
-  async function handleCreateOrRotateKey() {
-    if (!token || !selectedWorkspaceId) return
-    try {
-      const created = await apiFetch<WorkspaceKey>('/users/me/api-keys', token, {
-        method: 'POST',
-        body: JSON.stringify({ workspace_id: selectedWorkspaceId }),
-      })
-      setWorkspaceKeys((current) => [created, ...current.filter((item) => item.workspace_id !== selectedWorkspaceId)])
-      setStatus('空间 Key 已更新')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '生成 Key 失败')
-    }
-  }
-
-  async function handleDeleteCurrentKey() {
-    if (!token || !currentWorkspaceKey) return
-    try {
-      await apiFetch(`/users/me/api-keys/${currentWorkspaceKey.id}`, token, { method: 'DELETE' })
-      setWorkspaceKeys((current) => current.filter((item) => item.id !== currentWorkspaceKey.id))
-      setStatus('空间 Key 已删除')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '删除 Key 失败')
+      setLoading(false)
     }
   }
 
@@ -382,113 +273,129 @@ export default function AppStable() {
     event.preventDefault()
     if (!token || !selectedWorkspaceId || !uploadFile) return
     try {
+      setError(null)
+      const manualVersion = uploadVersion.trim() || window.prompt('Version is required when the package has no manifest version')?.trim() || ''
+      if (!manualVersion) {
+        setError('Version is required')
+        return
+      }
       const formData = new FormData()
       formData.append('package', uploadFile)
       if (uploadName.trim()) formData.append('name', uploadName.trim())
+      formData.append('version', manualVersion)
       if (uploadDescription.trim()) formData.append('description', uploadDescription.trim())
+      formData.append('visibility', uploadVisibility)
       await apiFetch<Skill>(`/workspaces/${selectedWorkspaceId}/skills/upload`, token, { method: 'POST', body: formData })
       setUploadFile(null)
       setUploadName('')
+      setUploadVersion('')
       setUploadDescription('')
-      await loadDashboard(token)
-      setStatus('Skill 上传成功')
+      await loadWorkspaceContext(selectedWorkspaceId, token)
+      if (user?.is_super_admin) await loadReviewVersions(token)
+      setStatus('Skill uploaded')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传 Skill 失败')
+      setError(err instanceof Error ? err.message : 'Upload failed')
     }
   }
 
-  async function handleCopySkillToCurrent(skill: Skill) {
+  async function handleCopyPrompt() {
     if (!token || !selectedWorkspaceId) return
     try {
-      await apiFetch(`/skills/${skill.id}/copy`, token, { method: 'POST', body: JSON.stringify({ target_workspace_id: selectedWorkspaceId }) })
-      await loadDashboard(token)
-      setStatus('已导入到当前空间')
+      setBusyPrompt(true)
+      setError(null)
+      const prompt = await apiFetch<WorkspacePrompt>(`/workspaces/${selectedWorkspaceId}/agent-prompt`, token)
+      setWorkspacePrompt(prompt)
+      await copyText(prompt.prompt_text)
+      setStatus('Skill MCP prompt copied')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '导入 Skill 失败')
+      setError(err instanceof Error ? err.message : 'Failed to copy prompt')
+    } finally {
+      setBusyPrompt(false)
     }
   }
 
-  async function handleSaveAvailability() {
-    if (!token || !selectedWorkspaceId) return
-    try {
-      const updated = await apiFetch<SkillAvailability[]>(`/workspaces/${selectedWorkspaceId}/skill-availability`, token, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled_skill_ids: availabilitySelection }),
-      })
-      setAvailability(updated)
-      setSkills(await apiFetch<Skill[]>(`/workspaces/${selectedWorkspaceId}/skills`, token))
-      if (selectedWorkspace?.team_id) await loadTeamContext(selectedWorkspace.team_id, selectedWorkspaceId, token)
-      setStatus('对外开放配置已保存')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存开放配置失败')
-    }
-  }
-
-  async function handleSaveMySkills() {
-    if (!token || !selectedWorkspace?.team_id) return
-    try {
-      await apiFetch(`/teams/${selectedWorkspace.team_id}/me/skills`, token, { method: 'PUT', body: JSON.stringify({ enabled_skill_ids: memberSelection }) })
-      setSkills(await apiFetch<Skill[]>(`/workspaces/${selectedWorkspace.id}/skills`, token))
-      setStatus('我的 Skill 选择已保存')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存个人 Skill 失败')
-    }
-  }
-
-  async function handleDeleteSkill(skillId: number) {
+  async function handleStartReview(versionId: number) {
     if (!token) return
     try {
-      await apiFetch(`/skills/${skillId}`, token, { method: 'DELETE' })
-      await loadDashboard(token)
-      setStatus('Skill 已删除')
+      setError(null)
+      const workbench = await apiFetch<ReviewWorkbench>(`/skill-versions/${versionId}/start-review`, token, { method: 'POST' })
+      setReviewWorkbenches((current) => ({ ...current, [versionId]: workbench }))
+      setStatus(`Review workbench prepared: ${versionId}`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '删除 Skill 失败')
+      setError(err instanceof Error ? err.message : 'Failed to start review')
     }
   }
 
-  async function handleRunTool(skill: Skill, tool: ToolDefinition) {
-    if (!token || !selectedWorkspaceId) return
-    const toolAlias = workspaceToolAlias(skill.id, tool.name)
+  async function handleReviewAction(versionId: number, action: 'approve' | 'reject') {
+    if (!token) return
     try {
-      setRunningToolId(toolAlias)
-      const args = parseToolArguments(toolInputs[toolAlias] ?? '{}')
-      const sessionId = await createWorkspaceSession(selectedWorkspaceId, token)
-      const callResponse = await mcpRequest(
-        `/mcp/workspaces/${selectedWorkspaceId}`,
-        token,
-        buildToolsCallRequest(toolAlias, args),
-        sessionId,
-      )
-      setToolOutputs((current) => ({ ...current, [toolAlias]: JSON.stringify(callResponse.payload.result, null, 2) }))
-      setStatus(`已通过工作区 MCP 调用 ${toolAlias}`)
+      setError(null)
+      await apiFetch(`/skill-versions/${versionId}/${action}`, token, { method: 'POST' })
+      if (selectedWorkspaceId && viewMode === 'workspace') await loadWorkspaceContext(selectedWorkspaceId, token)
+      await loadReviewVersions(token)
+      setStatus(action === 'approve' ? `Version approved: ${versionId}` : `Version rejected: ${versionId}`)
     } catch (err) {
-      setToolOutputs((current) => ({ ...current, [toolAlias]: err instanceof Error ? err.message : '工具调用失败' }))
-    } finally {
-      setRunningToolId(null)
+      setError(err instanceof Error ? err.message : `${action} failed`)
     }
   }
 
-  function toggleSelection(selection: number[], setter: Dispatch<SetStateAction<number[]>>, skillId: number) {
-    setter(selection.includes(skillId) ? selection.filter((item) => item !== skillId) : [...selection, skillId])
+  async function handleDeployVersion(version: ReviewSkillVersion) {
+    if (!token) return
+    try {
+      setError(null)
+      const workbench = reviewWorkbenches[version.id]
+      await apiFetch(`/skill-versions/${version.id}/deploy`, token, {
+        method: 'POST',
+        body: JSON.stringify({ review_attempt_id: workbench?.review_attempt_id }),
+      })
+      if (selectedWorkspaceId && viewMode === 'workspace') await loadWorkspaceContext(selectedWorkspaceId, token)
+      await loadReviewVersions(token)
+      setStatus(`Version deployed: ${version.id}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Deploy failed')
+      await loadReviewVersions(token)
+    }
+  }
+
+  async function handleDownloadVersion(version: SkillVersion, skillName: string) {
+    if (!token) return
+    try {
+      setBusyDownloadVersionId(version.id)
+      const response = await fetch(`${API_BASE_URL}${version.package_download_url}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error(`Download failed: ${response.status}`)
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = version.upload_filename ?? `${skillName}-${version.version}.zip`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      setStatus(`Downloaded ${skillName} ${version.version}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed')
+    } finally {
+      setBusyDownloadVersionId(null)
+    }
   }
 
   function handleLogout() {
     localStorage.removeItem('skillhub-token')
     setToken(null)
     setUser(null)
-    setPassword('')
-    setStatus('已退出登录')
   }
+
   if (!token || !user) {
     return (
       <main className="shell">
         <section className="hero-panel">
           <div className="hero-copy">
             <span className="eyebrow">SkillHub</span>
-            <h1>开源的团队 Skill 管理与 MCP 网关</h1>
-            <p>统一管理个人 Skill、团队 Skill 和可被 agent 调用的工具入口。</p>
-            <p>支持 ZIP 导入、团队权限控制、成员按需启用 Skill，以及单 Skill 与工作区级 MCP 接口。</p>
-            <p><a className="doc-link" href="/guide.html" target="_blank" rel="noreferrer">查看使用文档</a></p>
+            <h1>Skill 管理与 MCP 网关</h1>
+            <p>上传 Skill，交由超管在隔离运行空间部署，再通过单 Skill MCP 暴露给团队使用。</p>
           </div>
           <form className="auth-card" onSubmit={handleAuthSubmit}>
             <div className="tab-row">
@@ -497,16 +404,15 @@ export default function AppStable() {
             </div>
             <label>
               账号
-              <input value={account} onChange={(event) => setAccount(event.target.value)} placeholder="输入账号" />
+              <input value={account} onChange={(event) => setAccount(event.target.value)} placeholder="account" />
             </label>
             <label>
               密码
-              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="输入密码" />
+              <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="password" />
             </label>
-            <button className="primary-button" type="submit" disabled={authenticating || !account.trim() || !password}>
-              {authenticating ? '处理中...' : authMode === 'login' ? '进入控制台' : '注册并进入'}
+            <button className="primary-button" type="submit" disabled={loading || !account.trim() || !password}>
+              {loading ? '处理中...' : authMode === 'login' ? '登录' : '注册'}
             </button>
-            <p className="muted">{status}</p>
             {error ? <p className="error-text">{error}</p> : null}
           </form>
         </section>
@@ -517,266 +423,223 @@ export default function AppStable() {
   return (
     <main className="dashboard-shell dashboard-split">
       <aside className="sidebar-card scroll-pane">
-        <div>
-          <span className="eyebrow">控制台</span>
+        <div className="stack-form">
+          <span className="eyebrow">User</span>
           <h2>{user.account}</h2>
-          <p className="muted"><a className="doc-link" href="/guide.html" target="_blank" rel="noreferrer">打开使用文档</a></p>
+          <div className="role-strip">
+            {user.is_super_admin ? <span className="pill super">超管</span> : null}
+            {selectedWorkspace ? <span className="pill neutral">{selectedWorkspace.type === 'team' ? '团队空间' : '个人空间'}</span> : null}
+          </div>
           <p className="muted">{status}</p>
           {error ? <p className="error-text">{error}</p> : null}
         </div>
 
+        {user.is_super_admin ? (
+          <section className="stack-form">
+            <button className={viewMode === 'admin' ? 'workspace-item active' : 'workspace-item'} type="button" onClick={() => setViewMode('admin')}>
+              <strong>超管工作台</strong>
+              <span>{adminWorkspace ? `workspace ${adminWorkspace.id}` : 'server deployment space'}</span>
+            </button>
+          </section>
+        ) : null}
+
         <section className="stack-form">
-          <div><span className="eyebrow">空间</span><h3>我的工作区</h3></div>
+          <div>
+            <span className="eyebrow">Workspaces</span>
+            <h3>业务空间</h3>
+          </div>
           <div className="workspace-list">
-            {workspaces.map((workspace) => (
-              <button key={workspace.id} className={workspace.id === selectedWorkspaceId ? 'workspace-item active' : 'workspace-item'} onClick={() => void handleWorkspaceChange(workspace.id)}>
+            {userWorkspaces.map((workspace) => (
+              <button
+                key={workspace.id}
+                className={viewMode === 'workspace' && workspace.id === selectedWorkspaceId ? 'workspace-item active' : 'workspace-item'}
+                onClick={() => {
+                  setSelectedWorkspaceId(workspace.id)
+                  setViewMode('workspace')
+                }}
+                type="button"
+              >
                 <strong>{workspace.name}</strong>
-                <span>{workspace.type === 'team' ? '团队空间' : '个人空间'}</span>
+                <span>{workspace.type === 'team' ? '团队' : '个人'}</span>
               </button>
             ))}
           </div>
         </section>
 
-        {selectedWorkspace?.type === 'team' && selectedWorkspace.team_id ? (
-          <section className="stack-form">
-            <div>
-              <span className="eyebrow">团队入口</span>
-              <h3>{activeTeam?.name ?? selectedWorkspace.name}</h3>
-              <p className="muted">我的身份：{currentTeamMembership?.role === 'admin' ? '管理员' : '成员'}</p>
-            </div>
-            {isTeamAdmin ? (
-              <>
-                <form className="stack-form" onSubmit={handleAddMember}>
-                  <label>邀请成员<input value={memberAccount} onChange={(event) => setMemberAccount(event.target.value)} placeholder="输入账号" /></label>
-                  <label>角色<select value={memberRole} onChange={(event) => setMemberRole(event.target.value as 'admin' | 'member')}><option value="member">成员</option><option value="admin">管理员</option></select></label>
-                  <button className="secondary-button" type="submit">直接加入</button>
-                </form>
-                <div className="stack-form">
-                  <strong>待审核申请</strong>
-                  {joinRequests.map((item) => (
-                    <article key={item.id} className="member-card">
-                      <strong>{item.account}</strong>
-                      <div className="action-row">
-                        <button className="secondary-button" onClick={() => void handleJoinDecision(item.team_id, item.id, true)}>通过</button>
-                        <button className="ghost-button danger" onClick={() => void handleJoinDecision(item.team_id, item.id, false)}>拒绝</button>
-                      </div>
-                    </article>
-                  ))}
-                  {joinRequests.length === 0 ? <p className="muted">当前没有待审核申请。</p> : null}
-                </div>
-              </>
-            ) : null}
-            <div className="member-grid">
-              {members.map((member) => (
-                <article key={member.user_id} className="member-card"><strong>{member.account}</strong><span>{member.role}</span></article>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        <form className="stack-form" onSubmit={handleCreateTeam}>
-          <label>新建团队<input value={teamName} onChange={(event) => setTeamName(event.target.value)} placeholder="输入团队名" /></label>
-          <button className="secondary-button" type="submit">创建团队空间</button>
-        </form>
-
-        <section className="stack-form">
-          <div><span className="eyebrow">加入空间</span><h3>发现团队</h3></div>
-          {discoverTeams.map((team) => (
-            <article key={team.id} className="member-card">
-              <strong>{team.name}</strong>
-              <span>{team.has_pending_request ? '审核中' : '可申请加入'}</span>
-              <button className="secondary-button" disabled={team.has_pending_request} onClick={() => void handleRequestJoin(team.id)}>{team.has_pending_request ? '已提交申请' : '申请加入'}</button>
-            </article>
-          ))}
-          {discoverTeams.length === 0 ? <p className="muted">当前没有可加入的新团队。</p> : null}
-        </section>
-
-        <button className="ghost-button" onClick={handleLogout}>退出登录</button>
+        <button className="ghost-button" onClick={handleLogout} type="button">退出登录</button>
       </aside>
 
-      <section className="content-grid scroll-pane">
-        <header className="top-banner">
-          <div>
-            <span className="eyebrow">当前空间</span>
-            <h1>{selectedWorkspace?.name ?? '未选择空间'}</h1>
-            <p>{selectedWorkspace?.type === 'team' ? '团队空间支持审核加入、管理员开放 Skill、成员独立选择使用 Skill。' : '个人空间用于上传、测试和整理你自己的 Skill。'}</p>
-          </div>
-          <div className="status-box">
-            <span>状态</span>
-            <strong>{status}</strong>
-            {selectedWorkspace ? <p className="muted">工作区 ID：{selectedWorkspace.id}</p> : null}
-          </div>
-        </header>
-        {selectedWorkspace?.type === 'team' ? (
+      {viewMode === 'admin' ? (
+        <section className="content-grid scroll-pane">
+          <header className="top-banner">
+            <div>
+              <span className="eyebrow">Admin Workbench</span>
+              <h1>超管部署工作台</h1>
+              <p>审核候选版本，部署到服务器隔离运行空间，并只发布单 Skill MCP。</p>
+            </div>
+            <div className="status-box">
+              <span>运行空间</span>
+              <strong>{adminWorkspace?.name ?? '未初始化'}</strong>
+              {adminWorkspace ? <p className="muted">workspace ID: {adminWorkspace.id}</p> : null}
+            </div>
+          </header>
+
           <section className="panel panel-wide">
             <div className="section-head">
-              <div><span className="eyebrow">空间 Key</span><h3>当前团队空间 Key</h3></div>
-              <div className="action-row">
-                <button className="secondary-button" onClick={() => void handleCreateOrRotateKey()}>{currentWorkspaceKey ? '轮换 Key' : '生成 Key'}</button>
-                {currentWorkspaceKey ? <button className="ghost-button danger" onClick={() => void handleDeleteCurrentKey()}>删除 Key</button> : null}
-              </div>
-            </div>
-            <article className="key-card">
               <div>
-                <strong>{selectedWorkspace.name}</strong>
-                <p>每个成员在当前团队空间中只有一把长期可用 Key。</p>
-                {currentWorkspaceKey ? <p>创建时间：{new Date(currentWorkspaceKey.created_at).toLocaleString()}</p> : <p>尚未生成空间 Key。</p>}
-                {currentWorkspaceKey?.token ? <code>{currentWorkspaceKey.token}</code> : null}
+                <span className="eyebrow">Review Queue</span>
+                <h3>候选版本</h3>
               </div>
-            </article>
-          </section>
-        ) : null}
-
-        {selectedWorkspace?.type === 'team' && isTeamAdmin ? (
-          <section className="panel panel-wide">
-            <div className="section-head"><div><span className="eyebrow">管理员配置</span><h3>对外开放的 Skill</h3></div><button className="secondary-button" onClick={() => void handleSaveAvailability()}>保存开放列表</button></div>
-            <div className="member-grid">
-              {availability.map((item) => (
-                <label key={item.id} className="member-card">
-                  <strong>{item.name}</strong>
-                  <span>{item.tool_count} 个工具</span>
-                  <div className="toggle-row">
-                    <input className="toggle-input" type="checkbox" checked={availabilitySelection.includes(item.id)} onChange={() => toggleSelection(availabilitySelection, setAvailabilitySelection, item.id)} />
-                    <span className={availabilitySelection.includes(item.id) ? 'toggle-pill active' : 'toggle-pill'}>{availabilitySelection.includes(item.id) ? '已开放' : '未开放'}</span>
-                  </div>
-                  <small className="muted">{item.description ?? '暂无描述'}</small>
-                </label>
-              ))}
+              <button className="secondary-button" type="button" onClick={() => token && loadReviewVersions(token)}>刷新</button>
+            </div>
+            <div className="version-list">
+              {reviewVersions.map((version) => {
+                const workbench = reviewWorkbenches[version.id]
+                return (
+                  <article key={version.id} className="version-row">
+                    <div className="version-main">
+                      <div className="badge-row">
+                        <strong>{version.skill_name} {version.version}</strong>
+                        <span className={`pill ${version.status}`}>{version.status}</span>
+                        <span className={`pill ${version.deploy_status === 'deployed' ? 'approved' : version.deploy_status === 'failed' ? 'rejected' : 'neutral'}`}>
+                          {version.deploy_status}
+                        </span>
+                      </div>
+                      <p className="muted">{version.workspace_name}</p>
+                      <p className="muted">单 Skill MCP: {version.published_mcp_endpoint_url ?? buildSkillMcpEndpoint(version)}</p>
+                      {version.runtime_path ? <p className="muted">runtime: {version.runtime_path}</p> : null}
+                      {version.venv_path ? <p className="muted">venv: {version.venv_path}</p> : null}
+                      {version.deploy_error ? <p className="error-text">{version.deploy_error}</p> : null}
+                      {workbench ? (
+                        <div className="review-workbench">
+                          <strong>workbench</strong>
+                          <code>{workbench.workbench_path}</code>
+                          <p className="muted">{workbench.deployment_kind} | tools: {workbench.tool_count}</p>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="action-row">
+                      <button className="secondary-button" type="button" onClick={() => void handleDownloadVersion(version, version.skill_name)} disabled={busyDownloadVersionId === version.id}>
+                        {busyDownloadVersionId === version.id ? '下载中...' : '下载 ZIP'}
+                      </button>
+                      <button className="secondary-button" type="button" onClick={() => void handleStartReview(version.id)}>准备工作台</button>
+                      <button className="secondary-button" type="button" onClick={() => void handleDeployVersion(version)}>部署到服务器</button>
+                      <button className="secondary-button" type="button" onClick={() => void handleReviewAction(version.id, 'approve')}>批准</button>
+                      <button className="ghost-button danger" type="button" onClick={() => void handleReviewAction(version.id, 'reject')}>拒绝</button>
+                    </div>
+                  </article>
+                )
+              })}
+              {reviewVersions.length === 0 ? <p className="muted">当前没有候选版本。</p> : null}
             </div>
           </section>
-        ) : null}
-
-        {selectedWorkspace?.type === 'team' ? (
-          <section className="panel panel-wide">
-            <div className="section-head"><div><span className="eyebrow">成员配置</span><h3>我自己要使用的 Skill</h3></div><button className="secondary-button" onClick={() => void handleSaveMySkills()}>保存我的选择</button></div>
-            <div className="member-grid">
-              {selectableSkills.map((item) => (
-                <label key={item.id} className="member-card">
-                  <strong>{item.name}</strong>
-                  <span>{item.tool_count} 个工具</span>
-                  <div className="toggle-row">
-                    <input className="toggle-input" type="checkbox" checked={memberSelection.includes(item.id)} onChange={() => toggleSelection(memberSelection, setMemberSelection, item.id)} />
-                    <span className={memberSelection.includes(item.id) ? 'toggle-pill active' : 'toggle-pill'}>{memberSelection.includes(item.id) ? '正在使用' : '不使用'}</span>
-                  </div>
-                  <small className="muted">取消后，这个 Skill 不会出现在你的列表和接口中。</small>
-                </label>
-              ))}
-              {selectableSkills.length === 0 ? <p className="muted">当前没有可选择的团队 Skill。</p> : null}
-            </div>
-          </section>
-        ) : null}
-
-        <section className="panel panel-wide">
-          <div className="section-head"><div><span className="eyebrow">聚合器</span><h3>Agent 工作区 MCP 入口</h3></div></div>
-          <div className="mcp-block">
-            <strong>工作区 endpoint</strong>
-            <code>{workspaceAggregatorEndpoint ? `${API_BASE_URL}${workspaceAggregatorEndpoint}` : '请先选择工作区'}</code>
-            <strong>初始化请求</strong>
-            <pre>{JSON.stringify(buildInitializeRequest(), null, 2)}</pre>
-            <strong>列出当前可调用工具</strong>
-            <pre>{JSON.stringify(buildToolsListRequest(), null, 2)}</pre>
-            <strong>列出 Skill 说明资源</strong>
-            <pre>{JSON.stringify(buildResourcesListRequest(), null, 2)}</pre>
-            <p className="muted">agent 应直接使用工作区聚合器返回的扁平工具名，并通过 resources 读取 SKILL.md 说明。实际脚本执行全部留在后端。</p>
-          </div>
         </section>
+      ) : (
+        <section className="content-grid scroll-pane">
+          <header className="top-banner">
+            <div>
+              <span className="eyebrow">Workspace</span>
+              <h1>{selectedWorkspace?.name ?? '请选择业务空间'}</h1>
+              <p>业务空间只管理上传和可见 Skill；部署由超管工作台完成。</p>
+            </div>
+            <div className="status-box">
+              <span>MCP 暴露</span>
+              <strong>单 Skill MCP</strong>
+              {selectedWorkspace ? <p className="muted">workspace ID: {selectedWorkspace.id}</p> : null}
+            </div>
+          </header>
 
-        <section className="panel panel-wide">
-          <div className="section-head"><div><span className="eyebrow">Agent 目录</span><h3>当前工作区暴露给 agent 的 Skill 列表</h3></div></div>
-          <div className="card-grid skill-grid">
-            {skills.map((skill) => (
-              <article key={skill.id} className="card skill-card">
-                <div className="skill-header">
-                  <div>
-                    <h4>{skill.name}</h4>
-                    <p>{skill.description ?? '暂无描述'}</p>
-                  </div>
-                  <span className={`visibility ${skill.visibility}`}>{skill.visibility}</span>
-                </div>
-                <span className="key-meta">{skill.tools.length} 个工具</span>
-              </article>
-            ))}
-            {skills.length === 0 ? <p className="muted">当前工作区还没有暴露给 agent 的 Skill。</p> : null}
-          </div>
-        </section>
-
-        {canManageCurrentWorkspace ? (
-          <>
-            <section className="panel">
-              <div className="section-head"><div><span className="eyebrow">上传</span><h3>上传 Skill ZIP</h3></div></div>
-              <form className="stack-form" onSubmit={handleUploadSkill}>
-                <label>覆盖显示名称<input value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder="留空则使用 ZIP 内的名称" /></label>
-                <label>描述<textarea value={uploadDescription} onChange={(event) => setUploadDescription(event.target.value)} rows={3} placeholder="可选说明" /></label>
-                <label>ZIP 文件<input type="file" accept=".zip" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /></label>
-                <p className="muted">{uploadFile ? `已选择：${uploadFile.name}` : '尚未选择文件'}</p>
-                <button className="primary-button" type="submit">上传并注册</button>
-              </form>
-            </section>
-          </>
-        ) : (
-          <section className="panel">
-            <div className="section-head"><div><span className="eyebrow">Skill 管理</span><h3>当前空间由管理员维护</h3></div></div>
-            <p className="muted">团队成员可以发现、选择并调用 Skill，但不能修改团队空间中的 Skill。</p>
+          <section className="panel panel-wide">
+            <div className="section-head">
+              <div>
+                <span className="eyebrow">Upload</span>
+                <h3>上传 Skill ZIP</h3>
+              </div>
+            </div>
+            <form className="stack-form" onSubmit={handleUploadSkill}>
+              <label>名称<input value={uploadName} onChange={(event) => setUploadName(event.target.value)} placeholder="可选，覆盖包内名称" /></label>
+              <label>版本<input value={uploadVersion} onChange={(event) => setUploadVersion(event.target.value)} placeholder="包内没有 version 时必填" /></label>
+              <label>描述<textarea value={uploadDescription} onChange={(event) => setUploadDescription(event.target.value)} rows={3} /></label>
+              <label>
+                可见性
+                <select value={uploadVisibility} onChange={(event) => setUploadVisibility(event.target.value as 'private' | 'public')}>
+                  <option value="private">私有</option>
+                  <option value="public">公开</option>
+                </select>
+              </label>
+              <label>ZIP 包<input type="file" accept=".zip" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} /></label>
+              <button className="primary-button" type="submit" disabled={!selectedWorkspaceId || !uploadFile}>上传</button>
+            </form>
           </section>
-        )}
 
-        {selectedWorkspace?.type === 'team' && canManageCurrentWorkspace ? (
-          <section className="panel">
-            <div className="section-head"><div><span className="eyebrow">导入</span><h3>从个人空间导入 Skill</h3></div></div>
-            <div className="key-list">
-              {personalSkills.map((skill) => (
-                <article key={skill.id} className="key-card">
-                  <div><strong>{skill.name}</strong><p>{skill.description ?? '暂无描述'}</p></div>
-                  <button className="secondary-button" onClick={() => void handleCopySkillToCurrent(skill)}>导入到当前团队空间</button>
-                </article>
-              ))}
-              {personalSkills.length === 0 ? <p className="muted">个人空间里还没有可导入的 Skill。</p> : null}
+          <section className="panel panel-wide">
+            <div className="section-head">
+              <div>
+                <span className="eyebrow">Agent Prompt</span>
+                <h3>单 Skill MCP 提示词</h3>
+              </div>
+              <button className="secondary-button" onClick={() => void handleCopyPrompt()} type="button" disabled={!selectedWorkspaceId || busyPrompt}>
+                {busyPrompt ? '复制中...' : '复制给 agent'}
+              </button>
+            </div>
+            <div className="mcp-block">
+              {workspacePrompt ? <pre>{workspacePrompt.prompt_text}</pre> : <p className="muted">提示词只包含已可用 Skill 的独立 MCP 地址。</p>}
             </div>
           </section>
-        ) : null}
 
-        <section className="panel panel-wide">
-          <div className="section-head"><div><span className="eyebrow">可见 Skill</span><h3>当前对你可见的 Skill</h3></div></div>
-          <div className="skill-grid">
-            {skills.map((skill) => (
-              <article key={skill.id} className="skill-card">
-                <div className="skill-header"><div><h4>{skill.name}</h4><p>{skill.description ?? '暂无描述'}</p></div></div>
-                <div className="tool-tags">{skill.tools.map((tool) => <span key={tool.id}>{tool.name}</span>)}</div>
-                <div className="mcp-block">
-                  <strong>Agent 使用入口</strong>
-                  <code>{workspaceAggregatorEndpoint ? `${API_BASE_URL}${workspaceAggregatorEndpoint}` : '请先选择工作区'}</code>
-                  <pre>{workspaceAggregatorEndpoint ? buildCurlExample(API_BASE_URL, workspaceAggregatorEndpoint) : '请先选择工作区'}</pre>
-                  <p className="muted">该 Skill 的工具通过工作区聚合器暴露给 agent。后端负责脚本执行与结果返回。</p>
-                </div>
-                <details className="tool-collapse">
-                  <summary>展开通过工作区 MCP 的测试与调用</summary>
-                  <div className="tool-collapse-body">
-                    {skill.tools.map((tool) => (
-                      (() => {
-                        const alias = workspaceToolAlias(skill.id, tool.name)
-                        const exposedTool = workspaceToolMap.get(alias)
-                        return (
-                          <div key={tool.id} className="tool-tester">
-                            <div className="tool-tester-head"><strong>测试 {alias}</strong><span>{tool.description ?? '暂无描述'}</span></div>
-                            <p className="muted">agent 工具名：{alias}</p>
-                            <textarea rows={4} value={toolInputs[alias] ?? '{}'} onChange={(event) => setToolInputs((current) => ({ ...current, [alias]: event.target.value }))} placeholder='{"text":"hello"}' />
-                            <button className="secondary-button" onClick={() => void handleRunTool(skill, tool)} disabled={runningToolId === alias || !exposedTool}>
-                              {runningToolId === alias ? '调用中...' : exposedTool ? '通过工作区 MCP 调用' : '当前对 agent 不可见'}
-                            </button>
-                            <pre>{toolOutputs[alias] ?? '调用结果会显示在这里。'}</pre>
+          <section className="panel panel-wide">
+            <div className="section-head">
+              <div>
+                <span className="eyebrow">Skills</span>
+                <h3>Skill 列表</h3>
+              </div>
+            </div>
+            <div className="skill-grid">
+              {skills.map((skill) => (
+                <article key={skill.id} className="skill-card">
+                  <div className="skill-header">
+                    <div>
+                      <h4>{skill.name}</h4>
+                      <p>{skill.description ?? '暂无描述'}</p>
+                    </div>
+                    <div className="badge-row">
+                      <span className="visibility">{skill.visibility}</span>
+                      <span className={`pill ${skill.mcp_ready ? 'approved' : 'uploaded'}`}>{skill.mcp_ready ? 'MCP 可用' : '未上线'}</span>
+                    </div>
+                  </div>
+                  {skill.mcp_ready ? <code>{`${API_BASE_URL}${skill.mcp_endpoint}`}</code> : null}
+                  <div className="metric-grid">
+                    <article className="metric-card"><strong>批准版本</strong><p>{skill.current_approved_version?.version ?? '无'}</p></article>
+                    <article className="metric-card"><strong>部署版本</strong><p>{skill.deployed_version?.version ?? '无'}</p></article>
+                    <article className="metric-card"><strong>版本数</strong><p>{skill.version_count}</p></article>
+                  </div>
+                  <div className="version-list">
+                    {(versionMap[skill.id] ?? []).map((version) => (
+                      <article key={version.id} className="version-row">
+                        <div className="version-main">
+                          <div className="badge-row">
+                            <strong>{version.version}</strong>
+                            <span className={`pill ${version.status}`}>{version.status}</span>
+                            <span className={`pill ${version.deploy_status === 'deployed' ? 'approved' : version.deploy_status === 'failed' ? 'rejected' : 'neutral'}`}>{version.deploy_status}</span>
                           </div>
-                        )
-                      })()
+                          <p className="muted">上传者: {version.uploaded_by_account ?? '未知'} | {formatDate(version.created_at)}</p>
+                          <div className="tool-chip-list">{version.tools.map((tool) => <span key={tool.id}>{tool.name}</span>)}</div>
+                        </div>
+                        <div className="action-row">
+                          <button className="secondary-button" type="button" onClick={() => void handleDownloadVersion(version, skill.name)} disabled={busyDownloadVersionId === version.id}>
+                            {busyDownloadVersionId === version.id ? '下载中...' : '下载 ZIP'}
+                          </button>
+                        </div>
+                      </article>
                     ))}
                   </div>
-                </details>
-                {canManageCurrentWorkspace ? <button className="ghost-button danger" onClick={() => void handleDeleteSkill(skill.id)}>删除 Skill</button> : null}
-              </article>
-            ))}
-            {skills.length === 0 ? <p className="muted">当前没有对你开放的 Skill。</p> : null}
-          </div>
+                </article>
+              ))}
+              {skills.length === 0 ? <p className="muted">当前业务空间还没有 Skill。</p> : null}
+            </div>
+          </section>
         </section>
-      </section>
+      )}
     </main>
   )
 }

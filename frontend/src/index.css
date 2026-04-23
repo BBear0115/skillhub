@@ -228,7 +228,9 @@ textarea {
 .key-list,
 .member-grid,
 .skill-grid,
-.doc-grid {
+.doc-grid,
+.version-list,
+.metric-grid {
   display: grid;
   gap: 14px;
 }
@@ -283,6 +285,7 @@ textarea {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 16px;
+  gap: 16px;
 }
 
 .inline-form {
@@ -298,11 +301,62 @@ textarea {
 .key-card,
 .member-card,
 .skill-card,
-.doc-card {
+.doc-card,
+.metric-card,
+.version-row {
   border: 1px solid var(--line);
   border-radius: 22px;
   padding: 18px;
   background: var(--panel-strong);
+}
+
+.role-strip,
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  border: 1px solid rgba(22, 33, 29, 0.08);
+}
+
+.pill.super {
+  background: rgba(217, 93, 57, 0.14);
+  color: #9e401f;
+}
+
+.pill.neutral {
+  background: rgba(22, 33, 29, 0.08);
+  color: var(--muted);
+}
+
+.pill.uploaded {
+  background: rgba(12, 124, 89, 0.1);
+  color: var(--accent);
+}
+
+.pill.approved {
+  background: rgba(12, 124, 89, 0.16);
+  color: #0a5e45;
+}
+
+.pill.rejected {
+  background: rgba(217, 93, 57, 0.12);
+  color: var(--accent-2);
+}
+
+.pill.archived {
+  background: rgba(95, 110, 102, 0.12);
+  color: var(--muted);
 }
 
 .doc-grid {
@@ -323,6 +377,7 @@ textarea {
 .key-card code,
 .mcp-block code,
 .mcp-block pre,
+.review-workbench pre,
 .tool-tester pre {
   display: block;
   overflow-x: auto;
@@ -335,6 +390,25 @@ textarea {
 
 .member-grid {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.metric-card {
+  display: grid;
+  gap: 10px;
+}
+
+.metric-card strong,
+.version-main strong {
+  font-size: 1rem;
+}
+
+.metric-card p,
+.metric-card code {
+  margin: 0;
 }
 
 .member-card span {
@@ -356,6 +430,23 @@ textarea {
 .skill-card {
   display: grid;
   gap: 16px;
+}
+
+.version-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.version-main {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.version-main p {
+  margin: 0;
 }
 
 .skill-header {
@@ -383,7 +474,8 @@ textarea {
   gap: 8px;
 }
 
-.tool-tags span {
+.tool-tags span,
+.tool-chip-list span {
   padding: 6px 10px;
   border-radius: 999px;
   background: rgba(217, 93, 57, 0.1);
@@ -391,9 +483,29 @@ textarea {
   font-size: 0.9rem;
 }
 
+.tool-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .mcp-block {
   display: grid;
   gap: 10px;
+}
+
+.review-workbench-card {
+  display: grid;
+  gap: 16px;
+}
+
+.review-workbench {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .tool-tester {
@@ -499,6 +611,10 @@ textarea {
   color: var(--accent);
 }
 
+.toggle-card {
+  gap: 10px;
+}
+
 .doc-link {
   color: var(--accent);
   text-decoration: none;
@@ -531,6 +647,10 @@ button:hover {
 
   .inline-form {
     grid-template-columns: 1fr;
+  }
+
+  .version-row {
+    flex-direction: column;
   }
 }
 

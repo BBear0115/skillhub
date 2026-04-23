@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from types import ModuleType
@@ -12,7 +13,8 @@ from uuid import uuid4
 import httpx
 
 from app.config import settings
-from app.models import Skill, Tool
+from app.models import Tool
+from app.services.global_transfer_tools import read_artifact_manifest, store_existing_file_as_artifact
 
 DEFAULT_EXEC_TIMEOUT_SECONDS = 30
 DNSMOS_EXEC_TIMEOUT_SECONDS = 300
@@ -56,10 +58,22 @@ async def _execute_python_package(handler: dict[str, Any], tool: Tool, arguments
     if not module_path.exists():
         return {"content": [{"type": "text", "text": f"Module not found: {module_name}"}], "isError": True}
 
+    venv_python = handler.get("venv_python")
+    if isinstance(venv_python, str) and venv_python:
+        return await _execute_python_package_subprocess(handler, tool, arguments, Path(venv_python))
+
     try:
         module = _load_module(module_path)
         func = getattr(module, function_name)
-        context = {"tool": tool.name, "arguments": arguments, "skill_id": tool.skill_id}
+        context = {
+            "tool": tool.name,
+            "arguments": arguments,
+            "skill_id": tool.skill_id,
+            "skill_version_id": tool.skill_version_id,
+            "package_dir": str(Path(package_dir).resolve()),
+            "entrypoint": entrypoint,
+            "server_storage_root": str(Path(settings.storage_root).resolve()),
+        }
         if asyncio.iscoroutinefunction(func):
             result = await func(context)
         else:
@@ -69,6 +83,80 @@ async def _execute_python_package(handler: dict[str, Any], tool: Tool, arguments
         return {"content": [{"type": "text", "text": str(result)}], "isError": False}
     except Exception as exc:
         return {"content": [{"type": "text", "text": f"Execution error: {exc}"}], "isError": True}
+
+
+async def _execute_python_package_subprocess(handler: dict[str, Any], tool: Tool, arguments: dict, python_path: Path) -> dict:
+    package_dir = Path(handler["package_dir"]).resolve()
+    entrypoint = str(handler["entrypoint"])
+    if not python_path.exists():
+        return {"content": [{"type": "text", "text": f"Runtime Python not found: {python_path}"}], "isError": True}
+
+    context = {
+        "tool": tool.name,
+        "arguments": arguments,
+        "skill_id": tool.skill_id,
+        "skill_version_id": tool.skill_version_id,
+        "package_dir": str(package_dir),
+        "entrypoint": entrypoint,
+        "server_storage_root": str(Path(settings.storage_root).resolve()),
+    }
+    runner = r"""
+import asyncio
+import contextlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.stdin.read())
+package_dir = Path(payload["package_dir"]).resolve()
+module_name, _, function_name = payload["entrypoint"].partition(":")
+module_path = (package_dir / module_name).resolve()
+sys.path.insert(0, str(package_dir))
+spec = importlib.util.spec_from_file_location(f"skillhub_runtime_{module_path.stem}", module_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError(f"Unable to load module from {module_path}")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+func = getattr(module, function_name)
+with contextlib.redirect_stdout(sys.stderr):
+    if asyncio.iscoroutinefunction(func):
+        result = asyncio.run(func(payload["context"]))
+    else:
+        result = func(payload["context"])
+if isinstance(result, dict) and "content" in result:
+    output = {"content": result["content"], "isError": bool(result.get("isError", False))}
+else:
+    output = {"content": [{"type": "text", "text": str(result)}], "isError": False}
+print(json.dumps(output, ensure_ascii=False))
+"""
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run,
+            [str(python_path), "-c", runner],
+            input=json.dumps({"package_dir": str(package_dir), "entrypoint": entrypoint, "context": context}, ensure_ascii=False),
+            cwd=str(package_dir),
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_EXEC_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"content": [{"type": "text", "text": f"Execution timed out after {DEFAULT_EXEC_TIMEOUT_SECONDS}s"}], "isError": True}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Execution error: {exc}"}], "isError": True}
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if completed.returncode != 0:
+        return {"content": [{"type": "text", "text": stderr or stdout or f"Runtime exited with {completed.returncode}"}], "isError": True}
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        text = "\n".join(part for part in [stdout, stderr] if part)
+        return {"content": [{"type": "text", "text": text or "No output from runtime"}], "isError": True}
+    if stderr:
+        parsed.setdefault("content", []).append({"type": "text", "text": stderr})
+    return {"content": parsed.get("content", []), "isError": bool(parsed.get("isError", False))}
 
 
 def _normalize_flag_name(name: str) -> str:
@@ -116,7 +204,89 @@ def _managed_temp_dir(tool: Tool) -> Path:
     return temp_dir
 
 
-def _build_repo_exec_command(plugin: dict[str, Any], tool: Tool, script: dict[str, Any], arguments: dict[str, Any]) -> tuple[list[str], Path | None]:
+def _coerce_artifact_ids(arguments: dict[str, Any]) -> list[str]:
+    candidates = arguments.get("input_artifact_ids")
+    if isinstance(candidates, list):
+        return [str(item) for item in candidates if str(item).strip()]
+    nested = arguments.get("artifacts")
+    if isinstance(nested, dict):
+        nested_ids = nested.get("input_artifact_ids")
+        if isinstance(nested_ids, list):
+            return [str(item) for item in nested_ids if str(item).strip()]
+    return []
+
+
+def _materialize_audio_artifacts(tool: Tool, artifact_ids: list[str]) -> tuple[Path, list[dict[str, Any]]]:
+    temp_dir = _managed_temp_dir(tool)
+    input_dir = temp_dir / "artifact-input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    manifests: list[dict[str, Any]] = []
+    for artifact_id in artifact_ids:
+        manifest = read_artifact_manifest(artifact_id)
+        if not manifest:
+            raise FileNotFoundError(f"Uploaded artifact not found: {artifact_id}")
+        if manifest.get("deleted"):
+            raise RuntimeError(f"Uploaded artifact has been deleted: {artifact_id}")
+        content_path = Path(manifest["content_path"]).resolve()
+        if not content_path.exists():
+            raise FileNotFoundError(f"Uploaded artifact content missing: {artifact_id}")
+        shutil.copy2(content_path, input_dir / manifest["filename"])
+        manifests.append(manifest)
+    return input_dir, manifests
+
+
+def _register_output_artifacts(output_dir: Path, *, skill_name: str) -> list[dict[str, Any]]:
+    if not output_dir.exists():
+        return []
+    produced: list[dict[str, Any]] = []
+    batch_id = uuid4().hex
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = str(path.relative_to(output_dir)).replace("\\", "/")
+        produced.append(
+            store_existing_file_as_artifact(
+                path,
+                batch_id=batch_id,
+                metadata={"producer": skill_name, "relative_path": relative},
+            )
+        )
+    return produced
+
+
+def _inject_artifact_bridge_arguments(tool: Tool, script: dict[str, Any], arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if script.get("name") != "dnsmos_batch_filter.py":
+        return dict(arguments), {}
+
+    artifact_ids = _coerce_artifact_ids(arguments)
+    if not artifact_ids:
+        return dict(arguments), {}
+
+    updated_arguments = dict(arguments)
+    options = dict(updated_arguments.get("options") or {})
+    if options.get("input-dir") or options.get("input_dir"):
+        return updated_arguments, {}
+
+    input_dir, manifests = _materialize_audio_artifacts(tool, artifact_ids)
+    output_dir = input_dir.parent / "artifact-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    options["input-dir"] = str(input_dir)
+    options.setdefault("output-dir", str(output_dir))
+    updated_arguments["options"] = options
+    return updated_arguments, {
+        "input_dir": input_dir,
+        "output_dir": output_dir,
+        "source_artifacts": manifests,
+    }
+
+
+def _build_repo_exec_command(
+    plugin: dict[str, Any],
+    tool: Tool,
+    script: dict[str, Any],
+    arguments: dict[str, Any],
+    python_executable: str | None = None,
+) -> tuple[list[str], Path | None]:
     script_path = (Path(plugin["source"]) / "scripts" / script["name"]).resolve()
     plugin_root = Path(plugin["source"]).resolve()
     if script_path.suffix == ".sh":
@@ -125,7 +295,7 @@ def _build_repo_exec_command(plugin: dict[str, Any], tool: Tool, script: dict[st
             raise RuntimeError("Bash is required to execute shell-based skills on this host")
         command = [*bash, str(script_path)]
     else:
-        command = [sys.executable, str(script_path)]
+        command = [python_executable or sys.executable, str(script_path)]
     temp_input_path: Path | None = None
 
     option_index = _build_option_index(script.get("optionals", []))
@@ -217,6 +387,18 @@ def _resolve_repo_exec_timeout(plugin: dict[str, Any], script: dict[str, Any]) -
     return DEFAULT_EXEC_TIMEOUT_SECONDS
 
 
+def _runtime_env(plugin: dict[str, Any]) -> dict[str, str] | None:
+    venv_bin = plugin.get("venv_bin_path")
+    if not isinstance(venv_bin, str) or not venv_bin:
+        return None
+    env = os.environ.copy()
+    env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    venv_path = plugin.get("venv_path")
+    if isinstance(venv_path, str) and venv_path:
+        env["VIRTUAL_ENV"] = venv_path
+    return env
+
+
 async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, arguments: dict[str, Any]) -> dict:
     script = _resolve_repo_script(plugin, arguments)
     if script is None:
@@ -227,17 +409,28 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
     if not str(script_path).startswith(str(plugin_root)) or not script_path.exists():
         return {"content": [{"type": "text", "text": f"Script not found: {script.get('name')}"}], "isError": True}
 
-    command, temp_input_path = _build_repo_exec_command(plugin, tool, script, arguments)
+    resolved_arguments, artifact_bridge = _inject_artifact_bridge_arguments(tool, script, arguments)
+    python_executable = plugin.get("venv_python") if isinstance(plugin.get("venv_python"), str) else None
+    command, temp_input_path = _build_repo_exec_command(plugin, tool, script, resolved_arguments, python_executable)
     timeout_seconds = _resolve_repo_exec_timeout(plugin, script)
+    run_kwargs = {
+        "cwd": str(plugin_root),
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout_seconds,
+    }
+    env = _runtime_env(plugin)
+    if env is not None:
+        run_kwargs["env"] = env
     try:
-        completed = await asyncio.to_thread(
-            subprocess.run,
-            command,
-            cwd=str(plugin_root),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
+        try:
+            completed = await asyncio.to_thread(subprocess.run, command, **run_kwargs)
+        except TypeError as exc:
+            if "env" not in run_kwargs:
+                raise
+            legacy_kwargs = dict(run_kwargs)
+            legacy_kwargs.pop("env", None)
+            completed = await asyncio.to_thread(subprocess.run, command, **legacy_kwargs)
     except subprocess.TimeoutExpired:
         _cleanup_temp_input(temp_input_path)
         return {
@@ -285,6 +478,22 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
         content = [{"type": "text", "text": f"No output from {script['name']}"}]
         is_error = completed.returncode != 0
 
+    if not is_error and artifact_bridge.get("output_dir"):
+        produced_artifacts = _register_output_artifacts(Path(artifact_bridge["output_dir"]), skill_name=tool.name)
+        if produced_artifacts:
+            content.append(
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "produced_artifacts": produced_artifacts,
+                            "source_artifact_ids": [item["artifact_id"] for item in artifact_bridge.get("source_artifacts", [])],
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+
     return {"content": content, "isError": is_error}
 
 
@@ -312,8 +521,8 @@ async def _execute_marketplace_plugin(plugin: dict[str, Any], tool: Tool, argume
     return {"content": content, "isError": False}
 
 
-async def execute_tool(skill: Skill, tool: Tool, arguments: dict) -> dict:
-    handler = skill.handler_config or {}
+async def execute_tool(handler_config: dict[str, Any], tool: Tool, arguments: dict) -> dict:
+    handler = handler_config or {}
     handler_type = handler.get("type", "http")
 
     if handler_type == "http":

@@ -5,6 +5,7 @@ from sqlmodel import SQLModel, Field, Relationship
 
 if TYPE_CHECKING:
     from .skill import Skill
+    from .skill_version import SkillVersion
 
 
 class Tool(SQLModel, table=True):
@@ -12,9 +13,11 @@ class Tool(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     skill_id: int = Field(foreign_key="skills.id", nullable=False)
+    skill_version_id: int | None = Field(default=None, foreign_key="skill_versions.id", nullable=True)
     name: str = Field(nullable=False)
     description: str | None = Field(default=None)
     input_schema: dict = Field(default_factory=dict, sa_type=JSON)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
     skill: "Skill" = Relationship(back_populates="tools")
+    skill_version: "SkillVersion" = Relationship(back_populates="tools")

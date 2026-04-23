@@ -4,24 +4,65 @@ import re
 from urllib.parse import urlparse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Session, select
 
+import app.database as database_module
 from app.config import settings
 from app.database import init_db
+from app.core.security import get_password_hash, verify_password
+from app.models import User, Workspace
 from app.routers import auth, users, teams, workspaces, skills, tools, mcp
 from app.services.skill_packages import ensure_storage_root
 
 logger = logging.getLogger(__name__)
 
 
+def _ensure_super_admin() -> None:
+    if not settings.super_admin_account:
+        return
+    with Session(database_module.engine) as session:
+        user = session.exec(select(User).where(User.account == settings.super_admin_account)).first()
+        if user is None:
+            user = User(
+                account=settings.super_admin_account,
+                hashed_password=get_password_hash(settings.super_admin_password),
+            )
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+        else:
+            if not verify_password(settings.super_admin_password, user.hashed_password):
+                user.hashed_password = get_password_hash(settings.super_admin_password)
+                session.add(user)
+                session.commit()
+                session.refresh(user)
+
+        workspace = session.exec(
+            select(Workspace).where(Workspace.owner_id == user.id, Workspace.type == "personal")
+        ).first()
+        if workspace is None:
+            session.add(Workspace(name=f"{user.account}'s Personal", type="personal", owner_id=user.id))
+            session.commit()
+
+        admin_workspace = session.exec(
+            select(Workspace).where(Workspace.owner_id == user.id, Workspace.type == "admin")
+        ).first()
+        if admin_workspace is None:
+            session.add(Workspace(name="Super Admin Workbench", type="admin", owner_id=user.id))
+            session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    _ensure_super_admin()
     storage_root = ensure_storage_root()
     logger.info(
-        "SkillHub startup config: database_url=%s storage_root=%s frontend_url=%s",
+        "SkillHub startup config: database_url=%s storage_root=%s frontend_url=%s super_admin_account=%s",
         settings.database_url,
         storage_root,
         settings.frontend_url,
+        settings.super_admin_account,
     )
     yield
 

@@ -46,8 +46,38 @@ def skills_root_dir() -> Path:
     return root
 
 
+def skill_versions_root_dir() -> Path:
+    root = ensure_storage_root() / "skill-versions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def review_workbenches_root_dir() -> Path:
+    root = ensure_storage_root() / "review-workbenches"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def deployed_skills_root_dir() -> Path:
+    root = ensure_storage_root() / "deployed-skills"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def stable_skill_storage_dir(skill_id: int) -> Path:
     return skills_root_dir() / f"skill-{skill_id}"
+
+
+def stable_skill_version_storage_dir(version_id: int) -> Path:
+    return skill_versions_root_dir() / f"version-{version_id}"
+
+
+def stable_review_workbench_dir(version_id: int) -> Path:
+    return review_workbenches_root_dir() / f"version-{version_id}"
+
+
+def stable_deployed_skill_dir(skill_id: int, version_id: int) -> Path:
+    return deployed_skills_root_dir() / f"skill-{skill_id}" / f"version-{version_id}"
 
 
 def _find_legacy_skill_storage_dir(skill_id: int) -> Path | None:
@@ -66,6 +96,18 @@ def skill_storage_dir(skill_id: int) -> Path:
     if legacy_dir is not None:
         return legacy_dir
     return stable_dir
+
+
+def skill_version_storage_dir(version_id: int) -> Path:
+    return stable_skill_version_storage_dir(version_id)
+
+
+def review_workbench_dir(version_id: int) -> Path:
+    return stable_review_workbench_dir(version_id)
+
+
+def deployed_skill_dir(skill_id: int, version_id: int) -> Path:
+    return stable_deployed_skill_dir(skill_id, version_id)
 
 
 async def save_upload_to_disk(upload: UploadFile, target: Path) -> None:
@@ -409,6 +451,7 @@ def _build_exec_repo_import(root_dir: Path, skills_index_path: Path) -> dict[str
         "kind": "skill_repo_exec",
         "manifest": {
             "name": skills_index.get("name") or root_dir.name,
+            "version": skills_index.get("version"),
             "description": skills_index.get("description") or f"Imported executable skill repository from {root_dir.name}",
             "visibility": "private",
             "handler": {
@@ -500,6 +543,7 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
         "kind": "marketplace_repo",
         "manifest": {
             "name": marketplace.get("name") or root_dir.name,
+            "version": marketplace.get("version"),
             "description": marketplace.get("description") or f"Imported marketplace skill repository from {root_dir.name}",
             "visibility": "private",
             "handler": {
@@ -615,6 +659,63 @@ def extract_package_archive(archive_path: Path, target_dir: Path) -> dict[str, A
 def cleanup_skill_storage(skill_id: int) -> None:
     skill_dir = skill_storage_dir(skill_id)
     remove_tree(skill_dir)
+
+
+def cleanup_skill_version_storage(version_id: int) -> None:
+    version_dir = skill_version_storage_dir(version_id)
+    remove_tree(version_dir)
+
+
+def cleanup_review_workbench(version_id: int) -> None:
+    workbench_dir = review_workbench_dir(version_id)
+    remove_tree(workbench_dir)
+
+
+def cleanup_deployed_skill(skill_id: int, version_id: int) -> None:
+    deployment_dir = deployed_skill_dir(skill_id, version_id)
+    remove_tree(deployment_dir)
+
+
+def prepare_review_workbench(
+    version_id: int,
+    source_package_path: Path | None,
+    source_extracted_path: Path | None,
+) -> dict[str, str | None]:
+    workbench_dir = review_workbench_dir(version_id)
+    remove_tree(workbench_dir)
+    workbench_dir.mkdir(parents=True, exist_ok=True)
+
+    package_copy_path: Path | None = None
+    if source_package_path and source_package_path.exists():
+        package_copy_path = workbench_dir / "package.zip"
+        shutil.copy2(source_package_path, package_copy_path)
+
+    extracted_copy_path: Path | None = None
+    if source_extracted_path and source_extracted_path.exists():
+        extracted_copy_path = workbench_dir / "package"
+        shutil.copytree(source_extracted_path, extracted_copy_path)
+
+    return {
+        "workbench_path": str(workbench_dir),
+        "package_path": str(package_copy_path) if package_copy_path else None,
+        "extracted_path": str(extracted_copy_path) if extracted_copy_path else None,
+    }
+
+
+def deploy_skill_snapshot(
+    skill_id: int,
+    version_id: int,
+    source_extracted_path: Path,
+) -> dict[str, str]:
+    target_root = deployed_skill_dir(skill_id, version_id)
+    remove_tree(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
+    target_package_dir = target_root / "package"
+    shutil.copytree(source_extracted_path, target_package_dir)
+    return {
+        "deployment_root": str(target_root),
+        "deployment_path": str(target_package_dir),
+    }
 
 
 def clone_skill_storage(source_skill_id: int, target_skill_id: int) -> dict[str, str]:

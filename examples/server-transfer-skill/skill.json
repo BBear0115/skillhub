@@ -1,0 +1,65 @@
+{
+  "name": "Server Transfer Skill",
+  "version": "1.0.0",
+  "description": "Stream audio or text payloads into server-side storage and delete one or many streams.",
+  "visibility": "private",
+  "handler": {
+    "type": "python_package",
+    "entrypoint": "main.py:handle_tool"
+  },
+  "tools": [
+    {
+      "name": "stream_audio_to_server",
+      "description": "Store one audio chunk on the server and optionally finalize the assembled audio stream.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stream_id": { "type": "string", "description": "Stable stream identifier for the audio session." },
+          "chunk_index": { "type": "integer", "description": "Zero-based chunk order." },
+          "chunk_base64": { "type": "string", "description": "Base64-encoded audio bytes for this chunk." },
+          "mime_type": { "type": "string", "description": "Audio MIME type such as audio/wav or audio/mpeg." },
+          "finalize": { "type": "boolean", "description": "When true, the server assembles all uploaded chunks into one binary file." },
+          "metadata": { "type": "object", "description": "Optional stream metadata stored with the manifest.", "additionalProperties": true }
+        },
+        "required": ["stream_id", "chunk_index", "chunk_base64"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stream_text_to_server",
+      "description": "Store one text chunk on the server and optionally finalize the assembled text stream.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "stream_id": { "type": "string", "description": "Stable stream identifier for the text session." },
+          "chunk_index": { "type": "integer", "description": "Zero-based chunk order." },
+          "chunk_text": { "type": "string", "description": "Text content for this chunk." },
+          "encoding": { "type": "string", "description": "Encoding label recorded in the manifest.", "default": "utf-8" },
+          "finalize": { "type": "boolean", "description": "When true, the server assembles all text chunks into one text file." },
+          "metadata": { "type": "object", "description": "Optional stream metadata stored with the manifest.", "additionalProperties": true }
+        },
+        "required": ["stream_id", "chunk_index", "chunk_text"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "delete_server_streams",
+      "description": "Delete one stream immediately or delete many streams in one batch request.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "enum": ["stream", "batch"], "description": "Delete one stream or many streams." },
+          "kind": { "type": "string", "enum": ["audio", "text", "all"], "description": "Stream type to delete.", "default": "all" },
+          "stream_id": { "type": "string", "description": "Required when mode=stream." },
+          "stream_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Required when mode=batch."
+          }
+        },
+        "required": ["mode"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

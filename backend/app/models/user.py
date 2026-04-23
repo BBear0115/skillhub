@@ -5,7 +5,6 @@ from sqlmodel import SQLModel, Field, Relationship
 if TYPE_CHECKING:
     from .workspace import Workspace
     from .team import TeamMembership
-    from .api_key import ApiKey
 
 
 class User(SQLModel, table=True):
@@ -18,4 +17,3 @@ class User(SQLModel, table=True):
 
     workspaces: list["Workspace"] = Relationship(back_populates="owner")
     team_memberships: list["TeamMembership"] = Relationship(back_populates="user")
-    api_keys: list["ApiKey"] = Relationship(back_populates="user")

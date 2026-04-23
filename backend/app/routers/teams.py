@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import select
+from app.core.permissions import current_runtime_version, is_public_runtime_skill, workspace_skill_exposure_enabled
 from app.dependencies import SessionDep, CurrentUserDep
-from app.models import Team, TeamJoinRequest, TeamMembership, User, Workspace
+from app.models import Skill, Team, TeamJoinRequest, TeamMembership, User, Workspace
 
 router = APIRouter()
 
@@ -28,8 +29,6 @@ class TeamMemberResponse(BaseModel):
     user_id: int
     account: str
     role: str
-    skill_preferences: dict[str, bool] = {}
-    skill_preferences_configured: bool = False
 
 
 class TeamJoinRequestCreate(BaseModel):
@@ -57,7 +56,9 @@ class TeamSelectableSkillResponse(BaseModel):
     id: int
     name: str
     description: str | None
-    tool_count: int
+    workspace_id: int
+    visibility: str
+    source: str
 
 
 def _require_team_admin(team_id: int, user_id: int, session) -> Team:
@@ -88,6 +89,29 @@ def _get_membership(team_id: int, user_id: int, session) -> TeamMembership | Non
     return session.exec(
         select(TeamMembership).where(TeamMembership.team_id == team_id, TeamMembership.user_id == user_id)
     ).first()
+
+
+def _team_workspace(session, team_id: int) -> Workspace:
+    workspace = session.exec(select(Workspace).where(Workspace.team_id == team_id)).first()
+    if not workspace:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace
+
+
+def _selectable_skills(session, team: Team) -> list[Skill]:
+    workspace = _team_workspace(session, team.id)
+    local_skills = session.exec(select(Skill).where(Skill.workspace_id == workspace.id)).all()
+    public_skills = session.exec(select(Skill).where(Skill.visibility == "public")).all()
+    skills: dict[int, Skill] = {}
+    for skill in local_skills:
+        if current_runtime_version(session, skill) is not None and (
+            skill.visibility == "public" or workspace_skill_exposure_enabled(session, workspace, skill.id)
+        ):
+            skills[skill.id] = skill
+    for skill in public_skills:
+        if is_public_runtime_skill(session, skill):
+            skills[skill.id] = skill
+    return sorted(skills.values(), key=lambda item: (item.name.lower(), item.id))
 
 
 @router.post("", response_model=TeamResponse)
@@ -141,8 +165,6 @@ async def list_team_members(team_id: int, session: SessionDep, user: CurrentUser
             user_id=membership.user_id,
             account=user_map[membership.user_id].account,
             role=membership.role,
-            skill_preferences=membership.skill_preferences or {},
-            skill_preferences_configured=membership.skill_preferences_configured,
         )
         for membership in memberships
         if membership.user_id in user_map
@@ -173,8 +195,6 @@ async def add_team_member(team_id: int, data: TeamMemberCreate, session: Session
         user_id=target_user.id,
         account=target_user.account,
         role=membership.role,
-        skill_preferences=membership.skill_preferences or {},
-        skill_preferences_configured=membership.skill_preferences_configured,
     )
 
 
@@ -284,10 +304,15 @@ async def decide_join_request(team_id: int, request_id: int, data: TeamJoinReque
 
 @router.get("/{team_id}/me/skills")
 async def read_my_skill_preferences(team_id: int, session: SessionDep, user: CurrentUserDep):
-    _require_team_member(team_id, user.id, session)
+    team = _require_team_member(team_id, user.id, session)
     membership = _get_membership(team_id, user.id, session)
+    selectable = _selectable_skills(session, team)
+    allowed_ids = {skill.id for skill in selectable}
+    enabled_ids = [int(key) for key, value in (membership.skill_preferences or {}).items() if value and int(key) in allowed_ids] if membership else []
+    if membership and not membership.skill_preferences_configured:
+        enabled_ids = sorted(allowed_ids)
     return {
-        "enabled_skill_ids": [int(key) for key, value in (membership.skill_preferences or {}).items() if value],
+        "enabled_skill_ids": enabled_ids,
         "configured": membership.skill_preferences_configured if membership else False,
     }
 
@@ -295,33 +320,30 @@ async def read_my_skill_preferences(team_id: int, session: SessionDep, user: Cur
 @router.get("/{team_id}/selectable-skills", response_model=list[TeamSelectableSkillResponse])
 async def list_selectable_skills(team_id: int, session: SessionDep, user: CurrentUserDep):
     team = _require_team_member(team_id, user.id, session)
-    workspace = session.exec(select(Workspace).where(Workspace.team_id == team.id)).first()
-    if not workspace:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-    from app.models import Skill
-    skills = session.exec(select(Skill).where(Skill.workspace_id == workspace.id, Skill.enabled == True)).all()  # noqa: E712
-    return [
-        TeamSelectableSkillResponse(
-            id=skill.id,
-            name=skill.name,
-            description=skill.description,
-            tool_count=len(skill.tools),
+    workspace = _team_workspace(session, team.id)
+    results: list[TeamSelectableSkillResponse] = []
+    for skill in _selectable_skills(session, team):
+        results.append(
+            TeamSelectableSkillResponse(
+                id=skill.id,
+                name=skill.name,
+                description=skill.description,
+                workspace_id=skill.workspace_id,
+                visibility=skill.visibility,
+                source="public" if skill.visibility == "public" else ("team" if skill.workspace_id == workspace.id else "external"),
+            )
         )
-        for skill in skills
-        if skill.id is not None
-    ]
+    return results
 
 
 @router.put("/{team_id}/me/skills")
 async def update_my_skill_preferences(team_id: int, data: TeamSkillPreferenceUpdate, session: SessionDep, user: CurrentUserDep):
     team = _require_team_member(team_id, user.id, session)
     membership = _get_membership(team_id, user.id, session)
-    workspace = session.exec(select(Workspace).where(Workspace.team_id == team.id)).first()
-    if not workspace or not membership:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-    from app.models import Skill
-    selectable = session.exec(select(Skill).where(Skill.workspace_id == workspace.id, Skill.enabled == True)).all()  # noqa: E712
-    valid_skill_ids = {skill.id for skill in selectable if skill.id is not None}
+    if not membership:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Membership not found")
+    selectable = _selectable_skills(session, team)
+    valid_skill_ids = {skill.id for skill in selectable}
     invalid = sorted(set(data.enabled_skill_ids) - valid_skill_ids)
     if invalid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown enabled skills: {invalid}")

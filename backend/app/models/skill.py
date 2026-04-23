@@ -18,6 +18,8 @@ class Skill(SQLModel, table=True):
     visibility: str = Field(default="private", nullable=False)  # private or public
     enabled: bool = Field(default=True, nullable=False)
     handler_config: dict = Field(default_factory=dict, sa_type=JSON)
+    current_approved_version_id: int | None = Field(default=None, foreign_key="skill_versions.id", nullable=True)
+    deployed_version_id: int | None = Field(default=None, foreign_key="skill_versions.id", nullable=True)
     created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 

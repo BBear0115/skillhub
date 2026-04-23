@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlmodel import select
 from app.dependencies import SessionDep, CurrentUserDep
+from app.core.permissions import is_super_admin_user
 from app.models import Workspace, TeamMembership
 
 router = APIRouter()
@@ -23,4 +24,7 @@ async def list_workspaces(session: SessionDep, user: CurrentUserDep):
     team_workspaces = []
     if team_ids:
         team_workspaces = session.exec(select(Workspace).where(Workspace.team_id.in_(team_ids))).all()
-    return list(personal) + list(team_workspaces)
+    admin_workspaces = []
+    if is_super_admin_user(user):
+        admin_workspaces = session.exec(select(Workspace).where(Workspace.owner_id == user.id, Workspace.type == "admin")).all()
+    return list(admin_workspaces) + list(personal) + list(team_workspaces)

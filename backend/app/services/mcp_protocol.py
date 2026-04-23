@@ -1,26 +1,15 @@
 from datetime import datetime, timezone
-import hashlib
 from typing import Any
 from uuid import uuid4
 
 from sqlmodel import select
 
 from app.database import get_session
-from app.models import ApiKey, Skill, Tool, Workspace
+from app.models import Skill, Tool, Workspace
 from app.core.security import decode_access_token
 
 # In-memory session store (replace with Redis in production)
 sessions: dict[str, dict[str, Any]] = {}
-
-
-async def validate_api_key(key: str) -> dict[str, Any] | None:
-    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    for session in get_session():
-        keys = session.exec(select(ApiKey)).all()
-        for api_key in keys:
-            if api_key.key_hash == key_hash:
-                return {"user_id": api_key.user_id, "workspace_id": api_key.workspace_id, "auth_type": "api_key"}
-    return None
 
 
 async def get_auth_context(authorization: str | None) -> dict[str, Any] | None:
@@ -31,8 +20,6 @@ async def get_auth_context(authorization: str | None) -> dict[str, Any] | None:
         payload = decode_access_token(token)
         if payload and payload.get("sub"):
             return {"user_id": int(payload["sub"]), "workspace_id": None, "auth_type": "access_token"}
-        auth_context = await validate_api_key(token)
-        return auth_context
     return None
 
 

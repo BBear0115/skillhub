@@ -10,6 +10,9 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+.venv/
+.venv*/
+.pip-cache/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -26,6 +29,9 @@ frontend/node_modules/
 frontend/dist/
 
 # Local runtime data
+logs/
+run/
+.tmp/
 *.db
 *.db-journal
 *.sqlite
@@ -46,6 +52,8 @@ backend/.env.local
 
 # Local artifacts
 *.log
+.codex_*.tar.gz
+.codex_*manifest*.txt
 .codex-test-skillpkg*/
 .codex-test-skillpkg-*.zip
 claude-skills-main.zip

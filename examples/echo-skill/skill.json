@@ -1,5 +1,6 @@
 {
   "name": "Echo Skill",
+  "version": "1.0.0",
   "description": "A minimal python_package skill for SkillHub uploads.",
   "visibility": "private",
   "handler": {
