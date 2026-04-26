@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager
 import logging
-import re
 from urllib.parse import urlparse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

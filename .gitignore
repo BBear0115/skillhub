@@ -15,6 +15,7 @@ __pycache__/
 .ruff_cache/
 backend/.venv/
 backend/*.egg-info/
+backend/build/
 backend/.pytest_tmp/
 backend/.codex_pytest_tmp/
 backend/.codex_pytest_run_*/

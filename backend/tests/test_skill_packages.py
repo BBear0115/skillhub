@@ -4,6 +4,9 @@ from pathlib import Path
 from uuid import uuid4
 from zipfile import ZipFile
 
+import pytest
+from fastapi import HTTPException
+
 from app.services.skill_packages import extract_package_archive
 
 
@@ -150,5 +153,22 @@ def test_extract_package_archive_detects_shell_scripts_in_marketplace_repo() -> 
         assert plugin["doc_only"] is False
         assert plugin["default_script"] == "collect-data.sh"
         assert plugin["default_mode"] == "no_args"
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_extract_package_archive_rejects_prefix_traversal_paths() -> None:
+    tmp_root = _make_temp_dir()
+    archive_path = tmp_root / "unsafe.zip"
+    target_dir = tmp_root / "extract"
+    try:
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("../extract-evil/skill.json", "{}")
+
+        with pytest.raises(HTTPException) as exc_info:
+            extract_package_archive(archive_path, target_dir)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Archive contains unsafe paths"
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
