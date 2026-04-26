@@ -333,7 +333,6 @@ def test_docs_only_marketplace_repo_upload_is_imported_as_docs_backed_skill(clie
         files={"package": ("docs-only.zip", marketplace_zip.getvalue(), "application/zip")},
     )
     assert response.status_code == 200, response.text
-    skill_id = response.json()["id"]
 
     session_id = _mcp_initialize(test_client, admin_token, personal_workspace_id)
     tools_list = _mcp_request(test_client, admin_token, personal_workspace_id, session_id, "tools/list")

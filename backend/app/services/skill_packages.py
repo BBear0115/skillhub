@@ -172,6 +172,10 @@ def _safe_relative(path: Path, root_dir: Path) -> str:
     return str(path.resolve().relative_to(root_dir.resolve())).replace("\\", "/")
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    return path.resolve().is_relative_to(parent.resolve())
+
+
 def _inspect_script(script_path: Path) -> dict[str, Any]:
     if script_path.suffix == ".sh":
         text = script_path.read_text(encoding="utf-8", errors="ignore")
@@ -268,7 +272,7 @@ def _resolve_index_source(root_dir: Path, skills_index_path: Path, source: str) 
     root_resolved = root_dir.resolve()
 
     direct = (index_root / source).resolve()
-    if str(direct).startswith(str(root_resolved)):
+    if _is_relative_to(direct, root_resolved):
         return direct
 
     normalized_parts = [part for part in Path(source).parts if part not in ("..", ".")]
@@ -336,7 +340,7 @@ def _build_exec_repo_import(root_dir: Path, skills_index_path: Path) -> dict[str
             continue
 
         plugin_dir = _resolve_index_source(root_dir, skills_index_path, source)
-        if not str(plugin_dir).startswith(str(root_resolved)):
+        if not _is_relative_to(plugin_dir, root_resolved):
             continue
         skill_doc = plugin_dir / "SKILL.md"
         if not skill_doc.exists():
@@ -457,7 +461,7 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
             continue
 
         plugin_dir = (marketplace_root / source).resolve()
-        if not str(plugin_dir).startswith(str(root_resolved)) or not plugin_dir.exists():
+        if not _is_relative_to(plugin_dir, root_resolved) or not plugin_dir.exists():
             continue
 
         skill_doc = plugin_dir / "SKILL.md"
@@ -588,10 +592,11 @@ def extract_package_archive(archive_path: Path, target_dir: Path) -> dict[str, A
     target_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Extracting archive %s into %s", archive_path, target_dir)
+    target_resolved = target_dir.resolve()
     with ZipFile(archive_path) as archive:
         for member in archive.infolist():
-            member_path = (target_dir / member.filename).resolve()
-            if not str(member_path).startswith(str(target_dir.resolve())):
+            member_path = (target_resolved / member.filename).resolve()
+            if not member_path.is_relative_to(target_resolved):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Archive contains unsafe paths",

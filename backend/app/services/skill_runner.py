@@ -118,7 +118,6 @@ def _managed_temp_dir(tool: Tool) -> Path:
 
 def _build_repo_exec_command(plugin: dict[str, Any], tool: Tool, script: dict[str, Any], arguments: dict[str, Any]) -> tuple[list[str], Path | None]:
     script_path = (Path(plugin["source"]) / "scripts" / script["name"]).resolve()
-    plugin_root = Path(plugin["source"]).resolve()
     if script_path.suffix == ".sh":
         bash = _resolve_bash_executable()
         if bash is None:
@@ -224,7 +223,7 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
 
     script_path = (Path(plugin["source"]) / "scripts" / script["name"]).resolve()
     plugin_root = Path(plugin["source"]).resolve()
-    if not str(script_path).startswith(str(plugin_root)) or not script_path.exists():
+    if not script_path.is_relative_to(plugin_root) or not script_path.exists():
         return {"content": [{"type": "text", "text": f"Script not found: {script.get('name')}"}], "isError": True}
 
     command, temp_input_path = _build_repo_exec_command(plugin, tool, script, arguments)

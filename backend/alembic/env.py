@@ -5,7 +5,7 @@ from alembic import context
 from sqlmodel import SQLModel
 from app.config import settings
 
-import app.models
+import app.models  # noqa: F401 - register SQLModel metadata for Alembic autogenerate
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
