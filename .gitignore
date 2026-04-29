@@ -4,6 +4,11 @@ Thumbs.db
 .idea/
 .vscode/
 .claude/
+.codex_remote*/
+.codex_server_*/
+.codex_sync_to_server.py
+.dnsmos_e2e_state.json
+frontend-workbench/
 
 # Python
 __pycache__/
@@ -52,6 +57,8 @@ backend/.env.local
 
 # Local artifacts
 *.log
+*.zip
+*.tar.gz
 .codex_*.tar.gz
 .codex_*manifest*.txt
 .codex-test-skillpkg*/

@@ -54,11 +54,29 @@ def build_workspace_initialize_result(workspace: Workspace) -> dict[str, Any]:
 
 
 def build_tools_list(tools: list[Tool]) -> dict[str, Any]:
+    def _input_schema(tool: Tool) -> dict[str, Any]:
+        schema = dict(tool.input_schema or {})
+        if tool.name == "DNSMOS Audio Filter":
+            properties = dict(schema.get("properties") or {})
+            properties.setdefault(
+                "input_artifact_ids",
+                {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "description": "Streaming mode: pass exactly one uploaded audio artifact id per call. For many files, call DNSMOS Audio Filter repeatedly and download/delete each result before continuing.",
+                },
+            )
+            schema["properties"] = properties
+            schema["additionalProperties"] = True
+        return schema
+
     tools = [
         {
             "name": tool.name,
             "description": tool.description or "",
-            "inputSchema": tool.input_schema or {},
+            "inputSchema": _input_schema(tool),
         }
         for tool in tools
     ]

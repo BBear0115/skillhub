@@ -1,29 +1,30 @@
 # SkillHub
 
-Open-source skill management and MCP gateway for personal and team workspaces.
+Open-source Skill management console and MCP gateway for personal Skills, public Skill Market, and super-admin deployment.
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-SkillHub now uses a three-layer control model:
+## Overview
 
-- Super admin reviews `SkillVersion` and decides whether a version may enter MCP.
-- Team admins choose which approved `Skill` entries are exposed inside their team workspace.
-- Any team member may upload ZIP packages into the team workspace and create candidate versions.
+SkillHub lets users upload Skill ZIP packages, lets super admins review and deploy them, and exposes approved runtime Skills as concrete MCP endpoints that agents can call.
 
-Super admins can also start a review workbench for a candidate version. That prepares a deploy-ready server-side workbench directory, keeps the ZIP snapshot available for download, and exposes deployment metadata before approval.
+The current product model is intentionally simple:
 
-Actual MCP visibility requires both conditions:
+- Users manage their own Skills in a personal workspace.
+- Users can add public Skills from Skill Market into their own working list.
+- Super admins review packages, deploy runtimes, open MCP endpoints, configure prompts, and manage Market Skills.
+- Team/workspace compatibility remains in the backend, but the main UI flow focuses on personal Skills and the public Market.
 
-- The skill has a `current_approved_version_id`
-- The team workspace exposure for that skill is enabled
+## Features
 
-## Core Concepts
-
-- `Skill`: stable identity in a workspace
-- `SkillVersion`: immutable ZIP-backed version snapshot with `uploaded`, `approved`, `rejected`, or `archived` status
-- `WorkspaceSkillExposure`: team-level switch that controls whether an approved skill is exposed to team MCP
-
-Uploading a ZIP does not expose it to MCP. It only creates a candidate version.
+- Login/register with bearer-token authentication.
+- Personal Skill upload and version tracking.
+- Public Skill Market with details, tools, ZIP download, and prompt copy.
+- Super-admin Deploy Workbench for review, deploy, open MCP, reject, and prompt configuration.
+- Concrete Skill MCP endpoint: `/mcp/{workspace_id}/{skill_id}`.
+- Generated agent prompts that include MCP connection steps, authentication, Skill usage instructions, and global artifact transfer tools.
+- Global MCP tools for audio/text upload, processed artifact download, and cleanup.
+- Optional cleanup script for temporary audio/archive artifacts.
 
 ## Repository Layout
 
@@ -32,17 +33,21 @@ skillhub/
 |-- backend/
 |   |-- app/
 |   |-- alembic/
+|   |-- cleanup_audio_artifacts.py
 |   `-- pyproject.toml
+|-- examples/
+|   |-- echo-skill/
+|   `-- server-transfer-skill/
 |-- frontend/
-|   |-- public/
 |   |-- src/
 |   `-- package.json
-|-- examples/
 |-- scripts/
 |-- .env.example
 |-- README.md
 `-- README.zh-CN.md
 ```
+
+Runtime files such as `.env`, SQLite databases, logs, storage directories, ZIP packages, frontend build output, and Codex/server sync artifacts are intentionally ignored by Git.
 
 ## Quick Start
 
@@ -50,7 +55,7 @@ skillhub/
 
 - Python 3.12+
 - Node.js and npm
-- PowerShell if you want to use the helper script
+- PowerShell if using the helper script on Windows
 
 ### Backend
 
@@ -65,9 +70,28 @@ python -m venv .venv
 ```powershell
 cd frontend
 npm install
+npm run build
 ```
 
-### Run both services
+### Configuration
+
+Copy `.env.example` to `backend/.env` for local development and replace every placeholder:
+
+```env
+DATABASE_URL=sqlite:///./data/skillhub.db
+SECRET_KEY=<generate-a-long-random-secret>
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+ALGORITHM=HS256
+FRONTEND_URL=http://localhost:5173
+STORAGE_ROOT=./storage
+SUPER_ADMIN_ACCOUNT=<admin-account>
+SUPER_ADMIN_PASSWORD=<admin-password>
+VITE_API_BASE_URL=/api
+```
+
+Do not commit real `.env` files, database files, logs, uploaded packages, storage folders, or generated deployment artifacts.
+
+### Run Both Services
 
 From the repository root:
 
@@ -75,102 +99,118 @@ From the repository root:
 powershell -ExecutionPolicy Bypass -File .\scripts\run-skillhub.ps1
 ```
 
-Default URLs:
+Default local URLs:
 
 - Frontend: `http://127.0.0.1:5173`
 - Backend: `http://127.0.0.1:8000`
 - OpenAPI: `http://127.0.0.1:8000/docs`
 
-Local persistence:
+## Skill Package Rules
 
-- SQLite metadata: `backend/data/skillhub.db`
-- Uploaded ZIPs and extracted packages: `backend/storage/`
-
-## Environment Variables
-
-Reference values from [.env.example](.env.example):
-
-```env
-DATABASE_URL=sqlite:///./data/skillhub.db
-SECRET_KEY=dev-secret-key-change-in-production
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-ALGORITHM=HS256
-FRONTEND_URL=http://localhost:5173
-STORAGE_ROOT=./storage
-SUPER_ADMIN_ACCOUNT=
-VITE_API_BASE_URL=/api
-```
-
-Set `SUPER_ADMIN_ACCOUNT` to the account name that should be allowed to approve or reject skill versions.
-
-## ZIP Upload Rules
-
-- ZIP manifest must include `name`
-- ZIP manifest must include `version`
 - Upload endpoint: `POST /workspaces/{workspace_id}/skills/upload`
-- Implicit skill packages that only ship `SKILL.md + scripts/` may not include a manifest version. In that case, provide `version` in the multipart form when uploading.
+- ZIP packages should include `skill.json` or `skillhub.json`.
+- A docs-only Skill can also be imported from a package containing `SKILL.md`.
+- A repository package can expose multiple executable Skills through `skills-index.json` or marketplace metadata.
+- Uploading only creates an uploaded version. It is not MCP-ready until a super admin deploys and approves it.
 
-An upload creates:
+## Super Admin Flow
 
-- a new `Skill` plus one `uploaded` version, or
-- a new `uploaded` version under an existing skill with the same manifest name
+1. User uploads a Skill ZIP.
+2. Super admin starts review with `POST /skill-versions/{version_id}/start-review`.
+3. Super admin deploys the version.
+4. Runtime deployment copies the reviewed package into backend storage and creates a per-version virtual environment.
+5. Dependencies are installed from `requirements.txt`, `pyproject.toml`, or runtime metadata.
+6. Super admin approves the version and opens the concrete MCP endpoint.
+7. Super admin can edit Skill-specific prompt content and prompt join logic.
 
-## Review Workbench
+## MCP Usage
 
-- `POST /skill-versions/{version_id}/start-review`
-- Prepares a review workbench directory under backend storage
-- Copies the uploaded ZIP snapshot and extracted package contents into that workbench
-- Returns deployment metadata, handler details, and download information for the super admin
-
-## Main API Surface
-
-- `GET /workspaces/{workspace_id}/skills`
-- `GET /skills/{skill_id}`
-- `GET /skills/{skill_id}/versions`
-- `GET /skill-versions/{version_id}`
-- `GET /skill-versions/{version_id}/download`
-- `POST /skill-versions/{version_id}/approve`
-- `POST /skill-versions/{version_id}/reject`
-- `POST /skills/{skill_id}/clear-approved-version`
-- `GET /workspaces/{workspace_id}/approved-skills`
-- `GET /workspaces/{workspace_id}/skill-exposure`
-- `PUT /workspaces/{workspace_id}/skill-exposure`
-
-## MCP Endpoints
-
-Skill-level endpoint:
+Use only concrete Skill MCP endpoints:
 
 ```text
 /mcp/{workspace_id}/{skill_id}
 ```
 
-Only skill-level MCP is exposed for tool calls. It reads the current approved and deployed version snapshot. Unapproved, rejected, archived, undeployed, or non-exposed versions are invisible to MCP.
+The deprecated workspace MCP endpoint returns an explicit error and should not be used for tool calls.
 
-The legacy workspace MCP endpoint `/mcp/workspaces/{workspace_id}` is deprecated and returns an explicit error. It no longer mixes global tools, skill discovery, nested dispatch, or alias tools into one MCP surface.
+Runtime visibility requires:
 
-## Super Admin Runtime Workspace
+- approved version
+- deployed runtime
+- published MCP endpoint URL
+- valid `Authorization: Bearer <access_token>`
 
-Super admins have a dedicated admin workspace for review and deployment. Deploying a skill version:
+Generated prompts include the full MCP call sequence:
 
-- copies the reviewed package into `storage/admin-workspaces/.../deployments/...`
-- creates a per-version `.venv`
-- installs dependencies from `requirements.txt`, `pyproject.toml`, or optional `runtime.dependencies` in the skill manifest
-- publishes the skill MCP URL only if deployment succeeds
+1. Send `initialize` to the concrete MCP endpoint with the Authorization header.
+2. Read the `Mcp-Session-Id` response header and include it on later MCP requests.
+3. Call `tools/list` before selecting a business tool.
+4. Call `resources/list` and `resources/read` when resources are present.
+5. Call `tools/call` with `params.name` and JSON `params.arguments`.
+6. For file/audio work, upload one artifact, call one business tool, download the output, delete input/output artifacts, then continue.
 
-## Agent Notes
+## Global Artifact Tools
 
-- Super-admin review and deploy flows publish a concrete skill MCP endpoint: `server_base_url + mcp_endpoint`.
-- If a package has no embedded version, agents should generate and submit a deterministic form `version` during upload.
-- Agents should use concrete skill MCP URLs. Workspace MCP is deprecated.
-- Agent access uses standard `Authorization: Bearer <access_token>` only. API-key based MCP access has been removed.
+Every concrete Skill MCP endpoint exposes these helper tools:
+
+- `global_upload_audio_files`
+- `global_upload_text_files`
+- `global_download_processed_artifacts`
+- `global_download_processed_artifacts_and_cleanup`
+- `global_delete_uploaded_artifacts`
+
+The transfer tools are streaming-oriented:
+
+- upload one file per call
+- process one input artifact per business-tool call
+- download one processed artifact per call
+- delete one artifact per call
+
+Bulk artifact IDs are rejected for upload, processing, and normal download/delete paths so agents do not create long-running opaque jobs.
+
+## Artifact HTTP APIs
+
+- `POST /artifacts/audio`: upload one local audio file with multipart field `file`
+- `GET /artifacts/{artifact_id}`: read artifact manifest
+- `GET /artifacts/{artifact_id}/download`: download one artifact
+- `DELETE /artifacts/{artifact_id}?mode=soft|hard`: delete one artifact
+
+Artifacts are stored under the configured `STORAGE_ROOT`. Artifact IDs are validated and path traversal is blocked.
+
+## Cleanup
+
+Temporary audio/archive artifacts can be cleaned with:
+
+```bash
+python backend/cleanup_audio_artifacts.py --older-than-hours 24 --mode hard
+```
+
+The cleanup script only scans SkillHub artifact storage and does not delete Skill source packages, deployed runtimes, databases, logs, or unrelated server files.
+
+## Tests
+
+Backend tests:
+
+```powershell
+.\.venv\Scripts\pytest.exe backend\tests -q
+```
+
+Frontend build:
+
+```powershell
+cd frontend
+npm run build
+```
+
+## Security Notes
+
+- Treat uploaded Skill packages as untrusted until reviewed.
+- Use a strong `SECRET_KEY` in every real deployment.
+- Keep `SUPER_ADMIN_ACCOUNT` and `SUPER_ADMIN_PASSWORD` outside Git.
+- Do not commit `.env`, `backend/data`, `backend/storage`, logs, uploaded ZIPs, generated frontend `dist`, or remote sync artifacts.
+- Rotate any credential that was ever written into a local scratch file before publishing the repository.
 
 ## Example Skill Packages
 
 - `examples/echo-skill`
 - `examples/server-transfer-skill`
-
-`server-transfer-skill` includes:
-
-- `stream_audio_to_server`
-- `stream_text_to_server`
-- `delete_server_streams`

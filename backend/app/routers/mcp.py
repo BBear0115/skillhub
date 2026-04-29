@@ -11,9 +11,14 @@ from app.core.permissions import current_runtime_version, is_public_runtime_skil
 from app.database import get_session
 from app.models import Skill, SkillVersion, TeamMembership, Tool, Workspace
 from app.services import mcp_protocol
+from app.services.global_transfer_tools import execute_global_tool, list_global_tool_definitions
 from app.services.skill_runner import execute_tool
 
 router = APIRouter()
+
+
+def _global_tool_names() -> set[str]:
+    return {tool["name"] for tool in list_global_tool_definitions()}
 
 
 def _is_repo_handler(handler_type: str | None) -> bool:
@@ -389,7 +394,9 @@ async def mcp_post(
         skill_tools = session.exec(select(Tool).where(Tool.skill_version_id == version.id)).all()
 
         if method == "tools/list":
-            return _jsonrpc_result(req_id, mcp_protocol.build_tools_list(skill_tools))
+            payload = mcp_protocol.build_tools_list(skill_tools)
+            payload["tools"].extend(list_global_tool_definitions())
+            return _jsonrpc_result(req_id, payload)
 
         if method == "resources/list":
             resources = []
@@ -432,6 +439,8 @@ async def mcp_post(
             arguments = params.get("arguments", {})
             if not isinstance(arguments, dict):
                 return _jsonrpc_error(req_id, -32602, "Tool arguments must be an object")
+            if isinstance(tool_name, str) and tool_name in _global_tool_names():
+                return _jsonrpc_result(req_id, mcp_protocol.build_tool_result(execute_global_tool(tool_name, arguments)))
             tool = session.exec(select(Tool).where(Tool.skill_version_id == version.id, Tool.name == tool_name)).first()
             if not tool:
                 return _jsonrpc_error(req_id, -32602, f"Unknown tool: {tool_name}")

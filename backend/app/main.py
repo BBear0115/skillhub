@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 def _ensure_super_admin() -> None:
     if not settings.super_admin_account:
         return
+    if not settings.super_admin_password:
+        raise RuntimeError("SUPER_ADMIN_PASSWORD must be configured when SUPER_ADMIN_ACCOUNT is set")
     with Session(database_module.engine) as session:
         user = session.exec(select(User).where(User.account == settings.super_admin_account)).first()
         if user is None:

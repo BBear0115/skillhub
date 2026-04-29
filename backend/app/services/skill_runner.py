@@ -9,6 +9,7 @@ import sys
 from types import ModuleType
 from typing import Any
 from uuid import uuid4
+import zipfile
 
 import httpx
 
@@ -18,6 +19,18 @@ from app.services.global_transfer_tools import read_artifact_manifest, store_exi
 
 DEFAULT_EXEC_TIMEOUT_SECONDS = 30
 DNSMOS_EXEC_TIMEOUT_SECONDS = 300
+STREAM_TOOL_MAX_ITEMS = 1
+
+
+def _env_timeout(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def _resolve_bash_executable() -> list[str] | None:
@@ -138,10 +151,11 @@ print(json.dumps(output, ensure_ascii=False))
             cwd=str(package_dir),
             capture_output=True,
             text=True,
-            timeout=DEFAULT_EXEC_TIMEOUT_SECONDS,
+            timeout=_env_timeout("SKILLHUB_EXEC_TIMEOUT_SECONDS", DEFAULT_EXEC_TIMEOUT_SECONDS),
         )
     except subprocess.TimeoutExpired:
-        return {"content": [{"type": "text", "text": f"Execution timed out after {DEFAULT_EXEC_TIMEOUT_SECONDS}s"}], "isError": True}
+        timeout_seconds = _env_timeout("SKILLHUB_EXEC_TIMEOUT_SECONDS", DEFAULT_EXEC_TIMEOUT_SECONDS)
+        return {"content": [{"type": "text", "text": f"Execution timed out after {timeout_seconds}s"}], "isError": True}
     except Exception as exc:
         return {"content": [{"type": "text", "text": f"Execution error: {exc}"}], "isError": True}
 
@@ -235,12 +249,18 @@ def _materialize_audio_artifacts(tool: Tool, artifact_ids: list[str]) -> tuple[P
     return input_dir, manifests
 
 
-def _register_output_artifacts(output_dir: Path, *, skill_name: str) -> list[dict[str, Any]]:
+def _register_output_artifacts(
+    output_dir: Path,
+    *,
+    skill_name: str,
+    source_artifact_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
     if not output_dir.exists():
         return []
     produced: list[dict[str, Any]] = []
     batch_id = uuid4().hex
-    for path in sorted(output_dir.rglob("*")):
+    output_files = [path for path in sorted(output_dir.rglob("*")) if path.is_file()]
+    for path in output_files:
         if not path.is_file():
             continue
         relative = str(path.relative_to(output_dir)).replace("\\", "/")
@@ -251,7 +271,52 @@ def _register_output_artifacts(output_dir: Path, *, skill_name: str) -> list[dic
                 metadata={"producer": skill_name, "relative_path": relative},
             )
         )
+    if output_files and source_artifact_ids:
+        archive_path = output_dir.parent / f"{source_artifact_ids[0]}_dnsmos.zip"
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in output_files:
+                archive.write(path, str(path.relative_to(output_dir)).replace("\\", "/"))
+        produced.insert(
+            0,
+            store_existing_file_as_artifact(
+                archive_path,
+                artifact_id=f"{source_artifact_ids[0]}_dnsmos",
+                batch_id=batch_id,
+                kind="archive",
+                metadata={
+                    "producer": skill_name,
+                    "source_artifact_ids": source_artifact_ids,
+                    "contains_processed_outputs": True,
+                },
+            ),
+        )
     return produced
+
+
+def _resolve_declared_output_dir(script: dict[str, Any], arguments: dict[str, Any]) -> Path | None:
+    if script.get("name") != "dnsmos_batch_filter.py":
+        return None
+    options = arguments.get("options")
+    if not isinstance(options, dict):
+        return None
+    output_dir = options.get("output-dir") or options.get("output_dir")
+    if isinstance(output_dir, str) and output_dir:
+        return Path(output_dir)
+    input_dir = options.get("input-dir") or options.get("input_dir")
+    if isinstance(input_dir, str) and input_dir:
+        input_path = Path(input_dir)
+        return input_path.parent / f"{input_path.name}_dnsmos"
+    return None
+
+
+def _cleanup_artifact_bridge_dir(artifact_bridge: dict[str, Any]) -> None:
+    input_dir = artifact_bridge.get("input_dir")
+    if not input_dir:
+        return
+    try:
+        shutil.rmtree(Path(input_dir).parent, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _inject_artifact_bridge_arguments(tool: Tool, script: dict[str, Any], arguments: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -261,6 +326,11 @@ def _inject_artifact_bridge_arguments(tool: Tool, script: dict[str, Any], argume
     artifact_ids = _coerce_artifact_ids(arguments)
     if not artifact_ids:
         return dict(arguments), {}
+    if len(artifact_ids) > STREAM_TOOL_MAX_ITEMS:
+        raise ValueError(
+            f"Streaming mode accepts exactly one input_artifact_id per DNSMOS call; received {len(artifact_ids)}. "
+            "Call DNSMOS Audio Filter once per uploaded audio artifact, then download and delete that result before continuing."
+        )
 
     updated_arguments = dict(arguments)
     options = dict(updated_arguments.get("options") or {})
@@ -287,7 +357,7 @@ def _build_repo_exec_command(
     arguments: dict[str, Any],
     python_executable: str | None = None,
 ) -> tuple[list[str], Path | None]:
-    script_path = (Path(plugin["source"]) / "scripts" / script["name"]).resolve()
+    script_path = _resolve_plugin_script_path(plugin, script)
     plugin_root = Path(plugin["source"]).resolve()
     if script_path.suffix == ".sh":
         bash = _resolve_bash_executable()
@@ -365,6 +435,20 @@ def _build_repo_exec_command(
     return command, temp_input_path
 
 
+def _resolve_plugin_script_path(plugin: dict[str, Any], script: dict[str, Any]) -> Path:
+    plugin_root = Path(plugin["source"]).resolve()
+    script_name = str(script.get("name") or "")
+    script_path = (plugin_root / "scripts" / script_name).resolve()
+    if str(script_path).startswith(str(plugin_root)) and script_path.exists():
+        return script_path
+    for candidate in plugin_root.rglob(script_name):
+        if candidate.is_file() and "scripts" in candidate.parts:
+            resolved = candidate.resolve()
+            if str(resolved).startswith(str(plugin_root)):
+                return resolved
+    return script_path
+
+
 def _cleanup_temp_input(temp_input_path: Path | None) -> None:
     if temp_input_path is None:
         return
@@ -383,8 +467,8 @@ def _resolve_repo_exec_timeout(plugin: dict[str, Any], script: dict[str, Any]) -
         if isinstance(candidate, (int, float)) and candidate > 0:
             return candidate
     if script.get("name") == "dnsmos_batch_filter.py":
-        return DNSMOS_EXEC_TIMEOUT_SECONDS
-    return DEFAULT_EXEC_TIMEOUT_SECONDS
+        return _env_timeout("SKILLHUB_DNSMOS_EXEC_TIMEOUT_SECONDS", DNSMOS_EXEC_TIMEOUT_SECONDS)
+    return _env_timeout("SKILLHUB_EXEC_TIMEOUT_SECONDS", DEFAULT_EXEC_TIMEOUT_SECONDS)
 
 
 def _runtime_env(plugin: dict[str, Any]) -> dict[str, str] | None:
@@ -404,12 +488,36 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
     if script is None:
         return {"content": [{"type": "text", "text": f"Unknown script for {tool.name}"}], "isError": True}
 
-    script_path = (Path(plugin["source"]) / "scripts" / script["name"]).resolve()
+    script_path = _resolve_plugin_script_path(plugin, script)
     plugin_root = Path(plugin["source"]).resolve()
     if not str(script_path).startswith(str(plugin_root)) or not script_path.exists():
-        return {"content": [{"type": "text", "text": f"Script not found: {script.get('name')}"}], "isError": True}
+        script_name = str(script.get("name") or "")
+        candidates: list[str] = []
+        if plugin_root.exists():
+            candidates = [str(path) for path in plugin_root.rglob(script_name) if path.is_file()][:10]
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "error": f"Script not found: {script_name}",
+                            "plugin_source": str(plugin_root),
+                            "plugin_source_exists": plugin_root.exists(),
+                            "resolved_script_path": str(script_path),
+                            "candidate_matches": candidates,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "isError": True,
+        }
 
-    resolved_arguments, artifact_bridge = _inject_artifact_bridge_arguments(tool, script, arguments)
+    try:
+        resolved_arguments, artifact_bridge = _inject_artifact_bridge_arguments(tool, script, arguments)
+    except ValueError as exc:
+        return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     python_executable = plugin.get("venv_python") if isinstance(plugin.get("venv_python"), str) else None
     command, temp_input_path = _build_repo_exec_command(plugin, tool, script, resolved_arguments, python_executable)
     timeout_seconds = _resolve_repo_exec_timeout(plugin, script)
@@ -478,8 +586,14 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
         content = [{"type": "text", "text": f"No output from {script['name']}"}]
         is_error = completed.returncode != 0
 
-    if not is_error and artifact_bridge.get("output_dir"):
-        produced_artifacts = _register_output_artifacts(Path(artifact_bridge["output_dir"]), skill_name=tool.name)
+    if not is_error:
+        output_dir = Path(artifact_bridge["output_dir"]) if artifact_bridge.get("output_dir") else _resolve_declared_output_dir(script, resolved_arguments)
+        source_artifact_ids = [item["artifact_id"] for item in artifact_bridge.get("source_artifacts", [])]
+        produced_artifacts = (
+            _register_output_artifacts(output_dir, skill_name=tool.name, source_artifact_ids=source_artifact_ids)
+            if output_dir
+            else []
+        )
         if produced_artifacts:
             content.append(
                 {
@@ -487,12 +601,15 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
                     "text": json.dumps(
                         {
                             "produced_artifacts": produced_artifacts,
-                            "source_artifact_ids": [item["artifact_id"] for item in artifact_bridge.get("source_artifacts", [])],
+                            "source_artifact_ids": source_artifact_ids,
+                            "processed_archive_artifact_id": produced_artifacts[0]["artifact_id"],
+                            "processed_archive_download_url": produced_artifacts[0].get("download_url"),
                         },
                         ensure_ascii=False,
                     ),
                 }
             )
+        _cleanup_artifact_bridge_dir(artifact_bridge)
 
     return {"content": content, "isError": is_error}
 

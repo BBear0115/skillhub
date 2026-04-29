@@ -42,6 +42,19 @@ $env:DATABASE_URL = "sqlite:///./data/skillhub.db"
 $env:STORAGE_ROOT = $storageRoot
 $env:FRONTEND_URL = "http://localhost:5173"
 $env:PYTHONDONTWRITEBYTECODE = "1"
+if (-not $env:SKILLHUB_DEPLOY_COMMAND_TIMEOUT_SECONDS) {
+  $env:SKILLHUB_DEPLOY_COMMAND_TIMEOUT_SECONDS = "90"
+}
+if (-not $env:SKILLHUB_EXEC_TIMEOUT_SECONDS) {
+  $env:SKILLHUB_EXEC_TIMEOUT_SECONDS = "30"
+}
+if (-not $env:SKILLHUB_DNSMOS_EXEC_TIMEOUT_SECONDS) {
+  $env:SKILLHUB_DNSMOS_EXEC_TIMEOUT_SECONDS = "120"
+}
+$runtimePythonCandidate = "C:\Python311\python.exe"
+if ((-not $env:SKILLHUB_SKILL_RUNTIME_PYTHON) -and (Test-Path $runtimePythonCandidate)) {
+  $env:SKILLHUB_SKILL_RUNTIME_PYTHON = $runtimePythonCandidate
+}
 
 function Wait-ForUrl {
   param(

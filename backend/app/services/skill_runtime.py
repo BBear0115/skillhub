@@ -51,7 +51,18 @@ def venv_bin_path(venv_path: Path) -> Path:
     return venv_path / "bin"
 
 
+def _command_timeout(default: int) -> int:
+    raw = os.getenv("SKILLHUB_DEPLOY_COMMAND_TIMEOUT_SECONDS")
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
 def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    timeout = _command_timeout(timeout)
     completed = subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
@@ -63,6 +74,14 @@ def _run(command: list[str], *, cwd: Path | None = None, timeout: int = 600) -> 
         output = "\n".join(part for part in [completed.stdout.strip(), completed.stderr.strip()] if part)
         raise SkillDeploymentError(output or f"Command failed: {' '.join(command)}")
     return completed
+
+
+def _runtime_python_override() -> Path | None:
+    raw = os.getenv("SKILLHUB_SKILL_RUNTIME_PYTHON")
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.exists() else None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -177,13 +196,14 @@ def deploy_skill_runtime(
         raise SkillDeploymentError(f"Virtual environment Python not found: {python_path}")
 
     _install_dependencies(python_path, package_dir, dependencies)
+    runtime_python = _runtime_python_override() or python_path
 
     source_root = original_extracted_path.resolve() if original_extracted_path else source_extracted_path.resolve()
     deployed_handler = build_deployed_handler_config(
         handler_config,
         source_root,
         package_dir,
-        python_path,
+        runtime_python,
         venv_path,
     )
     return {

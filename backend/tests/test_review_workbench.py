@@ -207,7 +207,11 @@ def test_super_admin_review_workbench_prepares_download_and_deployment_flow(clie
         headers=_auth_headers(member_token),
     )
     assert prompt.status_code == 200, prompt.text
-    assert "global_upload_audio_files" not in prompt.json()["prompt_text"]
+    assert "global_upload_audio_files" in prompt.json()["prompt_text"]
+    assert "global_download_processed_artifacts" in prompt.json()["prompt_text"]
+    assert "Mcp-Session-Id" in prompt.json()["prompt_text"]
+    assert "tools/list" in prompt.json()["prompt_text"]
+    assert "resources/read" in prompt.json()["prompt_text"]
     assert prompt.json()["workspace_mcp_url"] == "deprecated"
     assert f"http://testserver/mcp/{team_workspace_id}/{skill_id}" in prompt.json()["prompt_text"]
 

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:5173"
     storage_root: str = "./storage"
     super_admin_account: str | None = None
-    super_admin_password: str = "SkillHubAdmin123!"
+    super_admin_password: str | None = None
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", extra="ignore")
 
     @model_validator(mode="after")

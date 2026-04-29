@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import wave
+import zipfile
 from pathlib import Path
 from subprocess import CompletedProcess
 from urllib.parse import urlparse
@@ -25,12 +26,32 @@ def _make_temp_dir() -> Path:
     return path
 
 
-def _dnsmos_zip_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "dnsmos-audio-filter (1).zip"
-
-
-def _dnsmos_zip_bytes() -> bytes:
-    return _dnsmos_zip_path().read_bytes()
+def _write_dnsmos_zip(archive_path: Path) -> Path:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "dnsmos-audio-filter/SKILL.md",
+            "---\n"
+            'description: "Filter audio files by DNSMOS quality score."\n'
+            "---\n"
+            "# DNSMOS Audio Filter\n\n"
+            "Run `python scripts/dnsmos_batch_filter.py --input-dir <dir> --output-dir <dir> "
+            "--model-path assets/sig_bak_ovr.onnx --threshold 1.3 --workers 1`.\n\n"
+            "The model asset is `assets/sig_bak_ovr.onnx`.\n",
+        )
+        archive.writestr(
+            "dnsmos-audio-filter/scripts/dnsmos_batch_filter.py",
+            "from argparse import ArgumentParser\n\n"
+            "parser = ArgumentParser()\n"
+            "parser.add_argument('--input-dir')\n"
+            "parser.add_argument('--output-dir')\n"
+            "parser.add_argument('--model-path')\n"
+            "parser.add_argument('--threshold')\n"
+            "parser.add_argument('--workers')\n"
+            "parser.parse_args()\n",
+        )
+        archive.writestr("dnsmos-audio-filter/assets/sig_bak_ovr.onnx", b"placeholder model")
+    return archive_path
 
 
 @pytest.fixture
@@ -306,9 +327,10 @@ def _review_and_publish_dnsmos_skill(
     admin_token: str,
     member_token: str,
     workspace_id: int,
+    tmp_root: Path,
 ) -> dict:
     super_admin_agent = SimulatedSuperAdminReviewAgent(client, super_admin_token)
-    package_path = _dnsmos_zip_path()
+    package_path = _write_dnsmos_zip(tmp_root / "dnsmos-audio-filter.zip")
     uploaded_skill = super_admin_agent.upload_dnsmos_skill(workspace_id, member_token, package_path)
     skill_id = uploaded_skill["id"]
 
@@ -337,13 +359,15 @@ def _review_and_publish_dnsmos_skill(
 
 
 def test_skill_mcp_exposes_dnsmos_resources_after_review_flow(client):
-    test_client, _tmp_root = client
+    test_client, tmp_root = client
     super_admin_token = _register(test_client, "root")
     admin_token = _register(test_client, "team-admin")
     member_token = _register(test_client, "team-member")
     _team_id, workspace_id = _create_team_with_member(test_client, admin_token, member_token, "Audio QA Team")
 
-    deployed = _review_and_publish_dnsmos_skill(test_client, super_admin_token, admin_token, member_token, workspace_id)
+    deployed = _review_and_publish_dnsmos_skill(
+        test_client, super_admin_token, admin_token, member_token, workspace_id, tmp_root
+    )
     skill_id = deployed["skill_id"]
 
     prompt = test_client.get(f"/workspaces/{workspace_id}/agent-prompt", headers=_auth_headers(member_token))
@@ -351,9 +375,19 @@ def test_skill_mcp_exposes_dnsmos_resources_after_review_flow(client):
     prompt_payload = prompt.json()
     assert prompt_payload["workspace_mcp_url"] == "deprecated"
     assert "DNSMOS Audio Filter" in prompt_payload["prompt_text"]
-    assert "Authentication: use Authorization: Bearer <workspace access token>." in prompt_payload["prompt_text"]
+    assert "Authentication: use this exact header: Authorization: Bearer " in prompt_payload["prompt_text"]
     assert "API key" not in prompt_payload["prompt_text"]
-    assert "global_delete_uploaded_artifacts" not in prompt_payload["prompt_text"]
+    assert "global_upload_audio_files" in prompt_payload["prompt_text"]
+    assert "global_download_processed_artifacts_and_cleanup" in prompt_payload["prompt_text"]
+    assert "global_delete_uploaded_artifacts" in prompt_payload["prompt_text"]
+    assert "Mcp-Session-Id" in prompt_payload["prompt_text"]
+    assert "resources/read" in prompt_payload["prompt_text"]
+    assert {item["name"] for item in prompt_payload["global_tools"]} >= {
+        "global_upload_audio_files",
+        "global_download_processed_artifacts",
+        "global_download_processed_artifacts_and_cleanup",
+        "global_delete_uploaded_artifacts",
+    }
     assert deployed["published_url"] in prompt_payload["prompt_text"]
 
     workspace_mcp = test_client.post(
@@ -368,7 +402,13 @@ def test_skill_mcp_exposes_dnsmos_resources_after_review_flow(client):
     agent.initialize()
     tools = agent.tools_list()
     tool_names = {item["name"] for item in tools}
-    assert tool_names == {"DNSMOS Audio Filter"}
+    assert tool_names >= {
+        "DNSMOS Audio Filter",
+        "global_upload_audio_files",
+        "global_download_processed_artifacts",
+        "global_download_processed_artifacts_and_cleanup",
+        "global_delete_uploaded_artifacts",
+    }
 
     resources = agent.resources_list()
     assert len(resources) == 1
@@ -396,7 +436,9 @@ def test_agents_complete_review_then_skill_mcp_call_dnsmos_with_agent_filled_inp
     admin_token = _register(test_client, "team-admin")
     member_token = _register(test_client, "team-member")
     _team_id, workspace_id = _create_team_with_member(test_client, admin_token, member_token, "Audio Agents")
-    deployed = _review_and_publish_dnsmos_skill(test_client, super_admin_token, admin_token, member_token, workspace_id)
+    deployed = _review_and_publish_dnsmos_skill(
+        test_client, super_admin_token, admin_token, member_token, workspace_id, tmp_root
+    )
 
     audio_dir = tmp_root / "audio-input"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -433,7 +475,13 @@ def test_agents_complete_review_then_skill_mcp_call_dnsmos_with_agent_filled_inp
     skill_agent = SimulatedSkillMcpAgent(test_client, member_token, deployed["published_url"])
     skill_agent.initialize()
     skill_tools = skill_agent.tools_list()
-    assert [tool["name"] for tool in skill_tools] == ["DNSMOS Audio Filter"]
+    assert {tool["name"] for tool in skill_tools} >= {
+        "DNSMOS Audio Filter",
+        "global_upload_audio_files",
+        "global_download_processed_artifacts",
+        "global_download_processed_artifacts_and_cleanup",
+        "global_delete_uploaded_artifacts",
+    }
     skill_resources = skill_agent.resources_list()
     assert len(skill_resources) == 1
     resource_text = skill_agent.resource_read(skill_resources[0]["uri"])
@@ -451,16 +499,72 @@ def test_agents_complete_review_then_skill_mcp_call_dnsmos_with_agent_filled_inp
 
     direct_skill_result = skill_agent.call_tool("DNSMOS Audio Filter", call_args)
     assert direct_skill_result["isError"] is False
+    assert _extract_produced_artifacts(direct_skill_result)
 
-    assert len(recorded_commands) == 1
-    for invocation in recorded_commands:
-        command = invocation["command"]
-        assert "--input-dir" in command
-        resolved_input_dir = Path(command[command.index("--input-dir") + 1])
-        assert resolved_input_dir.exists()
-        assert (resolved_input_dir / wav_path.name).exists()
-        assert str(audio_dir) in command
-        assert "--model-path" in command
-        assert "assets/sig_bak_ovr.onnx" in command
-        assert "--output-dir" in command
-        assert invocation["cwd"] is not None
+    upload_result = skill_agent.call_tool(
+        "global_upload_audio_files",
+        {
+            "files": [
+                {
+                    "filename": wav_path.name,
+                    "mime_type": "audio/wav",
+                    "content_base64": base64.b64encode(wav_bytes).decode("ascii"),
+                }
+            ]
+        },
+    )
+    upload_payload = json.loads(upload_result["content"][0]["text"])
+    input_artifact_id = upload_payload["saved"][0]["artifact_id"]
+
+    bridged_skill_result = skill_agent.call_tool(
+        "DNSMOS Audio Filter",
+        {
+            "input_artifact_ids": [input_artifact_id],
+            "options": {
+                "model-path": "assets/sig_bak_ovr.onnx",
+                "threshold": 1.3,
+                "workers": 1,
+            },
+        },
+    )
+    assert bridged_skill_result["isError"] is False
+    produced_artifacts = _extract_produced_artifacts(bridged_skill_result)
+    assert {item["filename"] for item in produced_artifacts} >= {"dnsmos_scores.csv", "sample.wav"}
+
+    cleanup_result = skill_agent.call_tool(
+        "global_download_processed_artifacts_and_cleanup",
+        {
+            "artifact_ids": [item["artifact_id"] for item in produced_artifacts],
+            "archive_name": "dnsmos-results.zip",
+            "cleanup_mode": "hard",
+        },
+    )
+    assert cleanup_result["isError"] is False
+    cleanup_payload = json.loads(cleanup_result["content"][0]["text"])
+    assert cleanup_payload["filename"] == "dnsmos-results.zip"
+    assert set(cleanup_payload["deleted_artifact_ids"]) == {item["artifact_id"] for item in produced_artifacts}
+    archive_bytes = base64.b64decode(cleanup_payload["content_base64"])
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        names = set(archive.namelist())
+    assert "dnsmos_scores.csv" in names
+    assert "high_quality/sample.wav" in names
+    for item in produced_artifacts:
+        missing = test_client.get(f"/artifacts/{item['artifact_id']}", headers=_auth_headers(member_token))
+        assert missing.status_code == 404
+
+    assert len(recorded_commands) == 2
+    direct_command = recorded_commands[0]["command"]
+    assert "--input-dir" in direct_command
+    resolved_input_dir = Path(direct_command[direct_command.index("--input-dir") + 1])
+    assert resolved_input_dir.exists()
+    assert (resolved_input_dir / wav_path.name).exists()
+    assert str(audio_dir) in direct_command
+    assert "--model-path" in direct_command
+    assert "assets/sig_bak_ovr.onnx" in direct_command
+    assert "--output-dir" in direct_command
+    assert recorded_commands[0]["cwd"] is not None
+
+    bridged_command = recorded_commands[1]["command"]
+    assert "--input-dir" in bridged_command
+    assert "--output-dir" in bridged_command
+    assert str(audio_dir) not in bridged_command

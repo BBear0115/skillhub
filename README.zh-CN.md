@@ -1,58 +1,63 @@
 # SkillHub
 
-面向个人空间与团队空间的开源 Skill 管理平台与 MCP 网关。
+面向个人 Skill、公开 Skill Market 和超管部署流程的开源 Skill 管理控制台与 MCP 网关。
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-SkillHub 现在采用三层职责分离模型：
+## 概览
 
-- 超级管理员只负责审核 `SkillVersion`，决定某个版本是否允许进入 MCP
-- 团队管理员只负责配置“团队空间里哪些已审核 Skill 对本团队开放”
-- 所有团队成员都可以把 ZIP 上传并安装到团队空间，形成候选版本
+SkillHub 支持用户上传 Skill ZIP 包，由超管审核、部署并开放为具体 MCP 端点，Agent 可以按提示词直接调用这些端点完成真实任务。
 
-超级管理员还可以对候选版本启动 review workbench。这个动作会在服务器侧准备审核/部署工作目录，同时保留 ZIP 快照下载入口和部署元信息。
+当前产品模型保持简化：
 
-Skill 真正进入 MCP 需要同时满足两个条件：
+- 普通用户管理自己的 Skill。
+- 普通用户可以从 Skill Market 添加公开 Skill 到自己的工作列表。
+- 超管负责审核包、部署运行时、开放 MCP、配置提示词和维护市场 Skill。
+- 后端仍保留团队/工作区兼容能力，但主界面聚焦个人 Skill 和公开市场。
 
-- 该 Skill 存在 `current_approved_version_id`
-- 该团队空间对该 Skill 的 exposure 已启用
+## 核心功能
 
-## 核心模型
+- 登录、注册和 Bearer Token 认证。
+- 个人 Skill 上传与版本管理。
+- 公开 Skill Market，支持查看详情、工具、ZIP 下载和提示词复制。
+- 超管部署工作台，支持审核、部署、开放 MCP、拒绝和提示词配置。
+- 具体 Skill MCP 端点：`/mcp/{workspace_id}/{skill_id}`。
+- 自动生成 Agent 提示词，包含 MCP 连接方式、认证方式、Skill 使用说明和全局 Artifact 传输工具。
+- 全局 MCP 工具支持音频/文本上传、处理结果下载和临时文件清理。
+- 可选清理脚本用于删除临时音频和压缩包 Artifact。
 
-- `Skill`：工作区内稳定的 Skill 身份
-- `SkillVersion`：每次 ZIP 上传形成的版本快照，状态固定为 `uploaded`、`approved`、`rejected`、`archived`
-- `WorkspaceSkillExposure`：团队空间维度的开放开关
-
-上传 ZIP 只会生成候选版本，不会自动进入 MCP。
-
-## 仓库结构
+## 目录结构
 
 ```text
 skillhub/
 |-- backend/
 |   |-- app/
 |   |-- alembic/
+|   |-- cleanup_audio_artifacts.py
 |   `-- pyproject.toml
+|-- examples/
+|   |-- echo-skill/
+|   `-- server-transfer-skill/
 |-- frontend/
-|   |-- public/
 |   |-- src/
 |   `-- package.json
-|-- examples/
 |-- scripts/
 |-- .env.example
 |-- README.md
 `-- README.zh-CN.md
 ```
 
+运行期文件不会提交到 Git，包括 `.env`、SQLite 数据库、日志、存储目录、ZIP 包、前端构建产物以及本地/服务器同步临时目录。
+
 ## 快速开始
 
-### 前置依赖
+### 环境要求
 
 - Python 3.12+
 - Node.js 和 npm
-- 如果需要用辅助脚本启动，使用 PowerShell
+- Windows 下使用启动脚本时需要 PowerShell
 
-### 后端安装
+### 后端
 
 ```powershell
 cd backend
@@ -60,14 +65,33 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-### 前端安装
+### 前端
 
 ```powershell
 cd frontend
 npm install
+npm run build
 ```
 
-### 同时启动前后端
+### 配置
+
+本地开发时将 `.env.example` 复制为 `backend/.env`，并替换所有占位符：
+
+```env
+DATABASE_URL=sqlite:///./data/skillhub.db
+SECRET_KEY=<generate-a-long-random-secret>
+ACCESS_TOKEN_EXPIRE_MINUTES=1440
+ALGORITHM=HS256
+FRONTEND_URL=http://localhost:5173
+STORAGE_ROOT=./storage
+SUPER_ADMIN_ACCOUNT=<admin-account>
+SUPER_ADMIN_PASSWORD=<admin-password>
+VITE_API_BASE_URL=/api
+```
+
+不要提交真实 `.env`、数据库、日志、上传包、存储目录或部署生成物。
+
+### 启动服务
 
 在仓库根目录执行：
 
@@ -75,118 +99,118 @@ npm install
 powershell -ExecutionPolicy Bypass -File .\scripts\run-skillhub.ps1
 ```
 
-默认地址：
+默认本地地址：
 
 - 前端：`http://127.0.0.1:5173`
 - 后端：`http://127.0.0.1:8000`
 - OpenAPI：`http://127.0.0.1:8000/docs`
 
-本地持久化目录：
+## Skill 包规则
 
-- SQLite 元数据：`backend/data/skillhub.db`
-- ZIP 包与解压内容：`backend/storage/`
+- 上传接口：`POST /workspaces/{workspace_id}/skills/upload`
+- ZIP 包应包含 `skill.json` 或 `skillhub.json`。
+- 仅文档型 Skill 也可以通过包含 `SKILL.md` 的包导入。
+- 仓库包可以通过 `skills-index.json` 或市场元数据暴露多个可执行 Skill。
+- 上传只会生成待审核版本。只有超管部署并批准后，Skill 才能通过 MCP 调用。
 
-## 环境变量
+## 超管流程
 
-参考 [.env.example](.env.example)：
+1. 用户上传 Skill ZIP。
+2. 超管调用 `POST /skill-versions/{version_id}/start-review` 开始审核。
+3. 超管部署该版本。
+4. 运行时部署会将审核包复制到后端存储，并为版本创建独立虚拟环境。
+5. 系统根据 `requirements.txt`、`pyproject.toml` 或运行时元数据安装依赖。
+6. 超管批准版本并开放具体 MCP 端点。
+7. 超管可以编辑 Skill 专属提示词和提示词拼接逻辑。
 
-```env
-DATABASE_URL=sqlite:///./data/skillhub.db
-SECRET_KEY=dev-secret-key-change-in-production
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
-ALGORITHM=HS256
-FRONTEND_URL=http://localhost:5173
-STORAGE_ROOT=./storage
-SUPER_ADMIN_ACCOUNT=
-VITE_API_BASE_URL=/api
-```
+## MCP 调用方式
 
-将 `SUPER_ADMIN_ACCOUNT` 设置为需要拥有版本审核权限的账号名。
-
-## ZIP 导入规则
-
-- ZIP manifest 必须包含 `name`
-- ZIP manifest 必须包含 `version`
-- 上传入口：`POST /workspaces/{workspace_id}/skills/upload`
-- 如果是只包含 `SKILL.md + scripts/` 的隐式 skill 包，ZIP 内可能没有 manifest version；此时需要在上传表单里额外填写 `version`
-
-导入后的结果只会是以下两种：
-
-- 如果 Skill 不存在，创建一个新的 `Skill` 和一个 `uploaded` 版本
-- 如果 Skill 已存在，在同名 Skill 下新增一个 `uploaded` 版本
-
-## 审核工作台
-
-- `POST /skill-versions/{version_id}/start-review`
-- 在后端存储目录中准备 review workbench
-- 把上传的 ZIP 快照和解压后的包内容复制到 workbench
-- 向超级管理员返回部署所需的 handler 信息、manifest 和下载入口
-
-## 主要接口
-
-- `GET /workspaces/{workspace_id}/skills`
-- `GET /skills/{skill_id}`
-- `GET /skills/{skill_id}/versions`
-- `GET /skill-versions/{version_id}`
-- `GET /skill-versions/{version_id}/download`
-- `POST /skill-versions/{version_id}/approve`
-- `POST /skill-versions/{version_id}/reject`
-- `POST /skills/{skill_id}/clear-approved-version`
-- `GET /workspaces/{workspace_id}/approved-skills`
-- `GET /workspaces/{workspace_id}/skill-exposure`
-- `PUT /workspaces/{workspace_id}/skill-exposure`
-
-## MCP 入口
-
-单 Skill 入口：
+只使用具体 Skill MCP 端点：
 
 ```text
 /mcp/{workspace_id}/{skill_id}
 ```
 
-工作区聚合入口：
+旧的工作区级 MCP 端点会返回明确错误，不应再用于工具调用。
 
-```text
-/mcp/workspaces/{workspace_id}
+运行时可见需要满足：
+
+- 版本已批准
+- 运行时已部署
+- MCP 端点已发布
+- 请求携带有效 `Authorization: Bearer <access_token>`
+
+生成的提示词会包含完整调用顺序：
+
+1. 带 `Authorization` 请求头向具体 MCP 端点发送 `initialize`。
+2. 读取响应头 `Mcp-Session-Id`，后续 MCP 请求都携带该会话 ID。
+3. 调用 `tools/list` 获取业务工具和全局工具。
+4. 如果存在资源，调用 `resources/list` 和 `resources/read`。
+5. 调用 `tools/call`，在 `params.name` 中写工具名，在 `params.arguments` 中传 JSON 参数。
+6. 对文件或音频任务，按“上传一个 Artifact、调用一次业务工具、下载输出、删除输入和输出 Artifact”的顺序循环处理。
+
+## 全局 Artifact 工具
+
+每个具体 Skill MCP 端点都会注入以下辅助工具：
+
+- `global_upload_audio_files`
+- `global_upload_text_files`
+- `global_download_processed_artifacts`
+- `global_download_processed_artifacts_and_cleanup`
+- `global_delete_uploaded_artifacts`
+
+这些工具按流式方式使用：
+
+- 每次调用只上传一个文件。
+- 每次业务工具调用只处理一个输入 Artifact。
+- 每次调用只下载一个处理后 Artifact。
+- 每次调用只删除一个 Artifact。
+
+批量 Artifact ID 会在上传、处理、普通下载和删除路径上被拒绝，避免 Agent 创建不可观察的长时间批处理任务。
+
+## Artifact HTTP API
+
+- `POST /artifacts/audio`：使用 multipart 字段 `file` 上传一个本地音频文件
+- `GET /artifacts/{artifact_id}`：读取 Artifact manifest
+- `GET /artifacts/{artifact_id}/download`：下载一个 Artifact
+- `DELETE /artifacts/{artifact_id}?mode=soft|hard`：删除一个 Artifact
+
+Artifact 存储在 `STORAGE_ROOT` 下。Artifact ID 会被校验，路径穿越会被阻断。
+
+## 清理
+
+可使用脚本清理临时音频和压缩包 Artifact：
+
+```bash
+python backend/cleanup_audio_artifacts.py --older-than-hours 24 --mode hard
 ```
 
-这两个入口都只读取“当前审核通过版本”的快照。未审核、已拒绝、已归档或未开放的版本都不会对 MCP 可见。
+清理脚本只扫描 SkillHub Artifact 存储，不会删除 Skill 源包、已部署运行时、数据库、日志或服务器上的其他文件。
 
-workspace MCP 当前会暴露：
+## 测试
 
-- `global_upload_audio_files`、`global_download_processed_artifacts` 等全局传输工具
-- 通过 `skills_list` 做业务 skill 发现
-- 通过 `skill_call` 做嵌套业务工具调用
-- 每个已批准 skill 的 alias tool 入口
+后端测试：
 
-## 文件处理闭环
+```powershell
+.\.venv\Scripts\pytest.exe backend\tests -q
+```
 
-SkillHub 现在支持面向文件处理 skill 的服务端闭环 artifact 流程：
+前端构建：
 
-1. 先通过 `global_upload_audio_files` 上传一个或多个音频文件
-2. agent 通过 workspace MCP 发现目标 skill
-3. 调用业务 skill 时直接传上传后的 artifact ID
-4. 当 skill 需要本地文件目录时，SkillHub 会自动把这些 artifact 物化成临时输入目录
-5. 处理结果，例如 CSV 报表或筛选后的音频，会被重新注册为可下载 artifact
-6. 再通过 `global_download_processed_artifacts` 下载处理结果
-7. 最后通过 `global_delete_uploaded_artifacts` 清理输入和输出 artifact
+```powershell
+cd frontend
+npm run build
+```
 
-对于 DNSMOS 这类 skill，agent 现在可以直接传 `input_artifact_ids`，不需要再手工把上传文件改写成本地 `input_dir`。SkillHub 会负责把上传 artifact 桥接到临时执行目录，并把输出重新发布到 artifact 存储中。
+## 安全说明
 
-## Agent 说明
-
-- 超管审核/部署流程仍然需要填写明确的 `mcp_endpoint_url`，但 agent 可以通过 skill 详情接口返回的 `mcp_endpoint` 自动推导：`server_base_url + mcp_endpoint`
-- 如果 skill 包没有内置版本号，agent 需要在上传时自动生成并提交一个稳定的表单 `version`
-- 对于需要同时发现多个业务 skill 的 agent，推荐优先走 workspace MCP；对于只调用单个 skill 的客户端，deploy 后仍然可以直接使用 skill MCP URL
-- agent 访问统一使用 `Authorization: Bearer <access_token>`，不再支持基于 API key 的 MCP 调用
+- 上传的 Skill 包在审核前都应视为不可信。
+- 每个真实部署都应使用强随机 `SECRET_KEY`。
+- `SUPER_ADMIN_ACCOUNT` 和 `SUPER_ADMIN_PASSWORD` 必须保存在 Git 之外。
+- 不要提交 `.env`、`backend/data`、`backend/storage`、日志、上传 ZIP、前端 `dist` 或远程同步临时目录。
+- 如果任何凭据曾写入本地临时文件，在发布仓库前应轮换。
 
 ## 示例 Skill 包
 
 - `examples/echo-skill`
 - `examples/server-transfer-skill`
-
-其中 `server-transfer-skill` 包含三个工具：
-
-- `stream_audio_to_server`
-- `stream_text_to_server`
-- `delete_server_streams`

@@ -18,8 +18,32 @@ def _make_temp_dir() -> Path:
     return path
 
 
-def _dnsmos_zip_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "dnsmos-audio-filter (1).zip"
+def _write_dnsmos_zip(archive_path: Path) -> Path:
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "dnsmos-audio-filter/SKILL.md",
+            "---\n"
+            'description: "Filter audio files by DNSMOS quality score."\n'
+            "---\n"
+            "# DNSMOS Audio Filter\n\n"
+            "Run `python scripts/dnsmos_batch_filter.py --input-dir <dir> --output-dir <dir> "
+            "--model-path assets/sig_bak_ovr.onnx --threshold 1.3 --workers 1`.\n\n"
+            "The model asset is `assets/sig_bak_ovr.onnx`.\n",
+        )
+        archive.writestr(
+            "dnsmos-audio-filter/scripts/dnsmos_batch_filter.py",
+            "from argparse import ArgumentParser\n\n"
+            "parser = ArgumentParser()\n"
+            "parser.add_argument('--input-dir')\n"
+            "parser.add_argument('--output-dir')\n"
+            "parser.add_argument('--model-path')\n"
+            "parser.add_argument('--threshold')\n"
+            "parser.add_argument('--workers')\n"
+            "parser.parse_args()\n",
+        )
+        archive.writestr("dnsmos-audio-filter/assets/sig_bak_ovr.onnx", b"placeholder model")
+    return archive_path
 
 
 def test_extract_package_archive_builds_exec_repo_manifest() -> None:
@@ -164,7 +188,7 @@ def test_extract_package_archive_detects_shell_scripts_in_marketplace_repo() -> 
 def test_extract_package_archive_builds_implicit_marketplace_repo_for_dnsmos_zip() -> None:
     tmp_root = _make_temp_dir()
     try:
-        extracted = extract_package_archive(_dnsmos_zip_path(), tmp_root / "unzipped")
+        extracted = extract_package_archive(_write_dnsmos_zip(tmp_root / "dnsmos-audio-filter.zip"), tmp_root / "unzipped")
 
         assert extracted["kind"] == "marketplace_repo"
         manifest = extracted["manifest"]
