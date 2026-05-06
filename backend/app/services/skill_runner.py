@@ -439,13 +439,20 @@ def _resolve_plugin_script_path(plugin: dict[str, Any], script: dict[str, Any]) 
     plugin_root = Path(plugin["source"]).resolve()
     script_name = str(script.get("name") or "")
     script_path = (plugin_root / "scripts" / script_name).resolve()
-    if str(script_path).startswith(str(plugin_root)) and script_path.exists():
-        return script_path
+    try:
+        script_path.relative_to(plugin_root)
+        if script_path.exists():
+            return script_path
+    except ValueError:
+        pass
     for candidate in plugin_root.rglob(script_name):
         if candidate.is_file() and "scripts" in candidate.parts:
             resolved = candidate.resolve()
-            if str(resolved).startswith(str(plugin_root)):
+            try:
+                resolved.relative_to(plugin_root)
                 return resolved
+            except ValueError:
+                continue
     return script_path
 
 
@@ -490,7 +497,12 @@ async def _execute_repo_python_script(plugin: dict[str, Any], tool: Tool, argume
 
     script_path = _resolve_plugin_script_path(plugin, script)
     plugin_root = Path(plugin["source"]).resolve()
-    if not str(script_path).startswith(str(plugin_root)) or not script_path.exists():
+    try:
+        script_path.relative_to(plugin_root)
+        script_in_plugin = True
+    except ValueError:
+        script_in_plugin = False
+    if not script_in_plugin or not script_path.exists():
         script_name = str(script.get("name") or "")
         candidates: list[str] = []
         if plugin_root.exists():
@@ -638,6 +650,12 @@ async def _execute_marketplace_plugin(plugin: dict[str, Any], tool: Tool, argume
     return {"content": content, "isError": False}
 
 
+async def _execute_docs_first_plugin(plugin: dict[str, Any], tool: Tool, arguments: dict[str, Any]) -> dict:
+    if plugin.get("scripts"):
+        return await _execute_repo_python_script(plugin, tool, arguments)
+    return await _execute_marketplace_plugin(plugin, tool, arguments)
+
+
 async def execute_tool(handler_config: dict[str, Any], tool: Tool, arguments: dict) -> dict:
     handler = handler_config or {}
     handler_type = handler.get("type", "http")
@@ -688,5 +706,12 @@ async def execute_tool(handler_config: dict[str, Any], tool: Tool, arguments: di
         if not plugin:
             return {"content": [{"type": "text", "text": f"Unknown marketplace skill: {tool.name}"}], "isError": True}
         return await _execute_marketplace_plugin(plugin, tool, arguments)
+
+    if handler_type == "docs_first_repo":
+        plugins = handler.get("plugins", {})
+        plugin = plugins.get(tool.name)
+        if not plugin:
+            return {"content": [{"type": "text", "text": f"Unknown docs-first skill: {tool.name}"}], "isError": True}
+        return await _execute_docs_first_plugin(plugin, tool, arguments)
 
     return {"content": [{"type": "text", "text": f"Unknown handler type: {handler_type}"}], "isError": True}

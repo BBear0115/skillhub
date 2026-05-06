@@ -130,6 +130,7 @@ def _find_marketplace_manifest(root_dir: Path) -> Path | None:
     hidden_metadata_paths = [
         root_dir / ".claude-plugin" / "marketplace.json",
         root_dir / ".codex-plugin" / "marketplace.json",
+        root_dir / ".cursor-plugin" / "marketplace.json",
     ]
     for candidate in hidden_metadata_paths:
         if candidate.exists():
@@ -182,7 +183,7 @@ def _resolve_archive_root(extracted_dir: Path) -> Path:
     return extracted_dir
 
 
-def _read_frontmatter_description(skill_doc: Path) -> str | None:
+def _read_frontmatter_value(skill_doc: Path, key: str) -> str | None:
     try:
         text = skill_doc.read_text(encoding="utf-8")
     except OSError:
@@ -193,7 +194,7 @@ def _read_frontmatter_description(skill_doc: Path) -> str | None:
     for line in lines[1:40]:
         if line.strip() == "---":
             break
-        if line.lower().startswith("description:"):
+        if line.lower().startswith(f"{key.lower()}:"):
             return line.split(":", 1)[1].strip().strip('"')
     return None
 
@@ -210,8 +211,24 @@ def _read_skill_doc_title(skill_doc: Path) -> str | None:
     return None
 
 
+def _read_frontmatter_description(skill_doc: Path) -> str | None:
+    return _read_frontmatter_value(skill_doc, "description")
+
+
+def _read_frontmatter_name(skill_doc: Path) -> str | None:
+    return _read_frontmatter_value(skill_doc, "name")
+
+
 def _safe_relative(path: Path, root_dir: Path) -> str:
     return str(path.resolve().relative_to(root_dir.resolve())).replace("\\", "/")
+
+
+def _is_relative_to(path: Path, root_dir: Path) -> bool:
+    try:
+        path.resolve().relative_to(root_dir.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _inspect_script(script_path: Path) -> dict[str, Any]:
@@ -310,7 +327,7 @@ def _resolve_index_source(root_dir: Path, skills_index_path: Path, source: str) 
     root_resolved = root_dir.resolve()
 
     direct = (index_root / source).resolve()
-    if str(direct).startswith(str(root_resolved)):
+    if _is_relative_to(direct, root_resolved):
         return direct
 
     normalized_parts = [part for part in Path(source).parts if part not in ("..", ".")]
@@ -378,18 +395,23 @@ def _build_exec_repo_import(root_dir: Path, skills_index_path: Path) -> dict[str
             continue
 
         plugin_dir = _resolve_index_source(root_dir, skills_index_path, source)
-        if not str(plugin_dir).startswith(str(root_resolved)):
+        if not _is_relative_to(plugin_dir, root_resolved):
             continue
         skill_doc = plugin_dir / "SKILL.md"
+        resolved_plugin_dir = plugin_dir
         if not skill_doc.exists():
-            continue
+            nested_skill_doc = _find_nested_skill_doc(plugin_dir)
+            if nested_skill_doc is None:
+                continue
+            skill_doc = nested_skill_doc
+            resolved_plugin_dir = skill_doc.parent
 
         script_paths = (
             sorted(
-                (path for path in (plugin_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
+                (path for path in (resolved_plugin_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
                 key=lambda path: (0 if path.suffix == ".py" else 1, path.name),
             )
-            if (plugin_dir / "scripts").exists()
+            if (resolved_plugin_dir / "scripts").exists()
             else []
         )
         if not script_paths:
@@ -397,28 +419,28 @@ def _build_exec_repo_import(root_dir: Path, skills_index_path: Path) -> dict[str
 
         scripts = [_inspect_script(script_path) for script_path in script_paths]
         default_script = _choose_default_script(scripts)
-        plugin_manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+        plugin_manifest_path = resolved_plugin_dir / ".claude-plugin" / "plugin.json"
         plugin_manifest = _safe_json(plugin_manifest_path) if plugin_manifest_path.exists() else {}
         description = entry.get("description") or plugin_manifest.get("description") or _read_frontmatter_description(skill_doc) or f"Execute {name}"
 
         references = sorted(
-            _safe_relative(path, root_dir) for path in (plugin_dir / "references").rglob("*")
+            _safe_relative(path, root_dir) for path in (resolved_plugin_dir / "references").rglob("*")
             if path.is_file()
-        ) if (plugin_dir / "references").exists() else []
+        ) if (resolved_plugin_dir / "references").exists() else []
         assets = sorted(
-            _safe_relative(path, root_dir) for path in (plugin_dir / "assets").rglob("*")
+            _safe_relative(path, root_dir) for path in (resolved_plugin_dir / "assets").rglob("*")
             if path.is_file()
-        ) if (plugin_dir / "assets").exists() else []
+        ) if (resolved_plugin_dir / "assets").exists() else []
         expected_outputs = sorted(
-            _safe_relative(path, root_dir) for path in (plugin_dir / "expected_outputs").rglob("*")
+            _safe_relative(path, root_dir) for path in (resolved_plugin_dir / "expected_outputs").rglob("*")
             if path.is_file()
-        ) if (plugin_dir / "expected_outputs").exists() else []
+        ) if (resolved_plugin_dir / "expected_outputs").exists() else []
 
         plugin_map[name] = {
             "name": name,
             "description": description,
-            "source": str(plugin_dir),
-            "source_relative": _safe_relative(plugin_dir, root_dir),
+            "source": str(resolved_plugin_dir),
+            "source_relative": _safe_relative(resolved_plugin_dir, root_dir),
             "skill_doc": str(skill_doc),
             "skill_doc_relative": _safe_relative(skill_doc, root_dir),
             "homepage": plugin_manifest.get("homepage") or entry.get("homepage"),
@@ -426,9 +448,9 @@ def _build_exec_repo_import(root_dir: Path, skills_index_path: Path) -> dict[str
             "category": entry.get("category") or plugin_manifest.get("category"),
             "plugin_manifest_path": str(plugin_manifest_path) if plugin_manifest_path.exists() else None,
             "plugin_manifest_relative": _safe_relative(plugin_manifest_path, root_dir) if plugin_manifest_path.exists() else None,
-            "readme_relative": _safe_relative(plugin_dir / "README.md", root_dir) if (plugin_dir / "README.md").exists() else None,
-            "settings_relative": _safe_relative(plugin_dir / "settings.json", root_dir) if (plugin_dir / "settings.json").exists() else None,
-            "evals_relative": _safe_relative(plugin_dir / "evals.json", root_dir) if (plugin_dir / "evals.json").exists() else None,
+            "readme_relative": _safe_relative(resolved_plugin_dir / "README.md", root_dir) if (resolved_plugin_dir / "README.md").exists() else None,
+            "settings_relative": _safe_relative(resolved_plugin_dir / "settings.json", root_dir) if (resolved_plugin_dir / "settings.json").exists() else None,
+            "evals_relative": _safe_relative(resolved_plugin_dir / "evals.json", root_dir) if (resolved_plugin_dir / "evals.json").exists() else None,
             "scripts": scripts,
             "default_script": default_script["name"],
             "default_mode": default_script["default_mode"],
@@ -492,6 +514,8 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
     plugin_map: dict[str, dict[str, Any]] = {}
     root_resolved = root_dir.resolve()
     marketplace_root = marketplace_path.parent.resolve()
+    if marketplace_root.name.startswith(".") and marketplace_root.parent == root_dir.resolve():
+        marketplace_root = root_dir.resolve()
 
     for entry in entries:
         name = entry.get("name")
@@ -500,19 +524,24 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
             continue
 
         plugin_dir = (marketplace_root / source).resolve()
-        if not str(plugin_dir).startswith(str(root_resolved)) or not plugin_dir.exists():
+        if not _is_relative_to(plugin_dir, root_resolved) or not plugin_dir.exists():
             continue
 
         skill_doc = plugin_dir / "SKILL.md"
+        resolved_plugin_dir = plugin_dir
         if not skill_doc.exists():
-            continue
+            nested_skill_doc = _find_nested_skill_doc(plugin_dir)
+            if nested_skill_doc is None:
+                continue
+            skill_doc = nested_skill_doc
+            resolved_plugin_dir = skill_doc.parent
 
         script_paths = (
             sorted(
-                (path for path in (plugin_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
+                (path for path in (resolved_plugin_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
                 key=lambda path: (0 if path.suffix == ".py" else 1, path.name),
             )
-            if (plugin_dir / "scripts").exists()
+            if (resolved_plugin_dir / "scripts").exists()
             else []
         )
         scripts = [_inspect_script(script_path) for script_path in script_paths]
@@ -522,8 +551,8 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
         plugin_map[name] = {
             "name": name,
             "description": description,
-            "source": str(plugin_dir),
-            "source_relative": _safe_relative(plugin_dir, root_dir),
+            "source": str(resolved_plugin_dir),
+            "source_relative": _safe_relative(resolved_plugin_dir, root_dir),
             "skill_doc": str(skill_doc),
             "skill_doc_relative": _safe_relative(skill_doc, root_dir),
             "homepage": entry.get("homepage"),
@@ -556,57 +585,123 @@ def _build_marketplace_repo_import(root_dir: Path, marketplace_path: Path) -> di
     }
 
 
-def _build_implicit_skill_import(root_dir: Path) -> dict[str, Any]:
-    skill_doc = root_dir / "SKILL.md"
-    if not skill_doc.exists():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded ZIP must contain skill.json/skillhub.json, or marketplace.json for a skill repository",
-        )
+def _collect_skill_doc_paths(root_dir: Path) -> list[Path]:
+    candidates = [
+        path
+        for path in root_dir.rglob("SKILL.md")
+        if "__MACOSX" not in path.parts
+        and ".git" not in path.parts
+        and "node_modules" not in path.parts
+    ]
+    candidates.sort(key=lambda path: (len(path.relative_to(root_dir).parts), str(path)))
+    return candidates
 
+
+def _find_nested_skill_doc(root_dir: Path) -> Path | None:
+    matches = _collect_skill_doc_paths(root_dir)
+    if not matches:
+        return None
+    return matches[0]
+
+
+def _build_docs_first_plugin(root_dir: Path, plugin_dir: Path, skill_doc: Path) -> dict[str, Any] | None:
     script_paths = (
         sorted(
-            (path for path in (root_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
+            (path for path in (plugin_dir / "scripts").iterdir() if path.is_file() and path.suffix in {".py", ".sh"}),
             key=lambda path: (0 if path.suffix == ".py" else 1, path.name),
         )
-        if (root_dir / "scripts").exists()
+        if (plugin_dir / "scripts").exists()
         else []
     )
     scripts = [_inspect_script(script_path) for script_path in script_paths]
     default_script = _choose_default_script(scripts) if scripts else None
-    skill_name = _read_skill_doc_title(skill_doc) or root_dir.name
-    description = _read_frontmatter_description(skill_doc) or f"Imported skill from {root_dir.name}"
+    plugin_manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
+    plugin_manifest = _safe_json(plugin_manifest_path) if plugin_manifest_path.exists() else {}
+    description = (
+        plugin_manifest.get("description")
+        or _read_frontmatter_description(skill_doc)
+        or f"Instructions for {plugin_dir.name}"
+    )
+    plugin_name = (
+        plugin_manifest.get("name")
+        or _read_frontmatter_name(skill_doc)
+        or _read_skill_doc_title(skill_doc)
+        or plugin_dir.name
+    )
 
-    plugin = {
-        "name": skill_name,
+    references = sorted(
+        _safe_relative(path, root_dir) for path in (plugin_dir / "references").rglob("*") if path.is_file()
+    ) if (plugin_dir / "references").exists() else []
+    assets = sorted(
+        _safe_relative(path, root_dir) for path in (plugin_dir / "assets").rglob("*") if path.is_file()
+    ) if (plugin_dir / "assets").exists() else []
+    expected_outputs = sorted(
+        _safe_relative(path, root_dir) for path in (plugin_dir / "expected_outputs").rglob("*") if path.is_file()
+    ) if (plugin_dir / "expected_outputs").exists() else []
+
+    return {
+        "name": plugin_name,
         "description": description,
-        "source": str(root_dir),
-        "source_relative": ".",
+        "source": str(plugin_dir),
+        "source_relative": _safe_relative(plugin_dir, root_dir),
         "skill_doc": str(skill_doc),
-        "skill_doc_relative": "SKILL.md",
-        "homepage": None,
-        "version": None,
-        "category": None,
+        "skill_doc_relative": _safe_relative(skill_doc, root_dir),
+        "homepage": plugin_manifest.get("homepage"),
+        "version": plugin_manifest.get("version"),
+        "category": plugin_manifest.get("category"),
+        "plugin_manifest_path": str(plugin_manifest_path) if plugin_manifest_path.exists() else None,
+        "plugin_manifest_relative": _safe_relative(plugin_manifest_path, root_dir) if plugin_manifest_path.exists() else None,
+        "readme_relative": _safe_relative(plugin_dir / "README.md", root_dir) if (plugin_dir / "README.md").exists() else None,
+        "settings_relative": _safe_relative(plugin_dir / "settings.json", root_dir) if (plugin_dir / "settings.json").exists() else None,
+        "evals_relative": _safe_relative(plugin_dir / "evals.json", root_dir) if (plugin_dir / "evals.json").exists() else None,
         "scripts": scripts,
         "default_script": default_script["name"] if default_script else None,
         "default_mode": default_script["default_mode"] if default_script else "docs_only",
         "doc_only": not scripts,
+        "references": references,
+        "assets": assets,
+        "expected_outputs": expected_outputs,
     }
 
+
+def _build_docs_first_repo_import(root_dir: Path, skill_docs: list[Path]) -> dict[str, Any]:
+    tool_definitions = []
+    plugin_map: dict[str, dict[str, Any]] = {}
+    used_names: set[str] = set()
+
+    for skill_doc in skill_docs:
+        plugin_dir = skill_doc.parent
+        plugin = _build_docs_first_plugin(root_dir, plugin_dir, skill_doc)
+        if plugin is None:
+            continue
+
+        base_name = str(plugin["name"]).strip() or plugin_dir.name
+        name = base_name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        used_names.add(name)
+        plugin["name"] = name
+        plugin_map[name] = plugin
+        tool_definitions.append(_build_marketplace_plugin_tool(plugin, _choose_default_script(plugin["scripts"]) if plugin["scripts"] else None))
+
+    if not tool_definitions:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No importable skills were found in the archive")
+
     return {
-        "kind": "marketplace_repo",
+        "kind": "docs_first_repo",
         "manifest": {
-            "name": skill_name,
-            "description": description,
+            "name": root_dir.name,
+            "description": f"Imported docs-first skill repository from {root_dir.name}",
             "visibility": "private",
             "handler": {
-                "type": "marketplace_repo",
+                "type": "docs_first_repo",
                 "root_dir": str(root_dir),
-                "plugins": {skill_name: plugin},
+                "plugins": plugin_map,
             },
-            "tools": [_build_marketplace_plugin_tool(plugin, default_script)],
+            "tools": tool_definitions,
         },
-        "root_dir": root_dir,
     }
 
 
@@ -621,7 +716,7 @@ def _build_single_skill_import(root_dir: Path) -> dict[str, Any]:
             }
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Uploaded ZIP must contain skill.json/skillhub.json, or marketplace.json for a skill repository",
+        detail="Uploaded ZIP must contain skill.json/skillhub.json, a docs-first SKILL.md skill folder, skills-index.json, or marketplace.json for a skill repository",
     )
 
 
@@ -635,7 +730,7 @@ def extract_package_archive(archive_path: Path, target_dir: Path) -> dict[str, A
     with ZipFile(archive_path) as archive:
         for member in archive.infolist():
             member_path = (target_dir / member.filename).resolve()
-            if not str(member_path).startswith(str(target_dir.resolve())):
+            if not _is_relative_to(member_path, target_dir):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Archive contains unsafe paths",
@@ -649,10 +744,12 @@ def extract_package_archive(archive_path: Path, target_dir: Path) -> dict[str, A
     marketplace_path = _find_marketplace_manifest(root_dir)
     if marketplace_path is not None:
         return _build_marketplace_repo_import(root_dir, marketplace_path)
-    if any((root_dir / manifest_name).exists() for manifest_name in MANIFEST_NAMES):
-        return _build_single_skill_import(root_dir)
-    if _has_implicit_skill_layout(root_dir):
-        return _build_implicit_skill_import(root_dir)
+    for manifest_name in MANIFEST_NAMES:
+        if (root_dir / manifest_name).exists():
+            return _build_single_skill_import(root_dir)
+    skill_docs = _collect_skill_doc_paths(root_dir)
+    if skill_docs:
+        return _build_docs_first_repo_import(root_dir, skill_docs)
     return _build_single_skill_import(root_dir)
 
 

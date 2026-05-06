@@ -134,12 +134,12 @@ async def create_team(data: TeamCreate, session: SessionDep, user: CurrentUserDe
 @router.get("", response_model=list[TeamResponse])
 async def list_teams(session: SessionDep, user: CurrentUserDep):
     memberships = session.exec(select(TeamMembership).where(TeamMembership.user_id == user.id)).all()
-    team_ids = [m.team_id for m in memberships]
     pending = session.exec(
         select(TeamJoinRequest).where(TeamJoinRequest.user_id == user.id, TeamJoinRequest.status == "pending")
     ).all()
     pending_team_ids = {item.team_id for item in pending}
-    teams = session.exec(select(Team)).all()
+    team_ids = [membership.team_id for membership in memberships]
+    teams = session.exec(select(Team).where(Team.id.in_(team_ids))).all() if team_ids else []
     membership_map = {item.team_id: item for item in memberships}
     return [
         TeamResponse(

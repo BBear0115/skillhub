@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
+from app.core.security import create_access_token
 import app.database as database_module
 from app.config import settings
 from app.main import app
@@ -51,6 +52,14 @@ def _zip_example_skill_without_version() -> bytes:
                 archive.writestr(relative, json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
             else:
                 archive.writestr(relative, path.read_bytes())
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _zip_with_unsafe_path() -> bytes:
+    buffer = io.BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr("../outside/skill.json", json.dumps({"name": "Unsafe", "version": "1.0.0"}))
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -334,3 +343,99 @@ def test_upload_allows_manual_version_when_manifest_has_no_version(client):
     versions = test_client.get(f"/skills/{skill_id}/versions", headers=_auth_headers(owner_token))
     assert versions.status_code == 200, versions.text
     assert versions.json()[0]["version"] == "manual-v1"
+
+
+def test_upload_rejects_unsafe_zip_path_and_bad_handler_config(client):
+    test_client, _tmp_root = client
+    token = _register(test_client, "owner")
+    workspace_id = _workspace_id_for(test_client, token, "personal")
+
+    unsafe_upload = test_client.post(
+        f"/workspaces/{workspace_id}/skills/upload",
+        headers=_auth_headers(token),
+        files={"package": ("unsafe.zip", _zip_with_unsafe_path(), "application/zip")},
+    )
+    assert unsafe_upload.status_code == 400, unsafe_upload.text
+    assert unsafe_upload.json()["detail"] == "Archive contains unsafe paths"
+
+    bad_config = test_client.post(
+        f"/workspaces/{workspace_id}/skills/upload",
+        headers=_auth_headers(token),
+        data={"handler_config": "{not-json"},
+        files={"package": ("server-transfer-skill.zip", _zip_example_skill(), "application/zip")},
+    )
+    assert bad_config.status_code == 400, bad_config.text
+    assert bad_config.json()["detail"] == "handler_config must be valid JSON"
+
+
+def test_team_list_only_returns_memberships(client):
+    test_client, _tmp_root = client
+    owner_token = _register(test_client, "owner")
+    outsider_token = _register(test_client, "outsider")
+
+    create_team = test_client.post("/teams", headers=_auth_headers(owner_token), json={"name": "Private Team"})
+    assert create_team.status_code == 200, create_team.text
+    team_id = create_team.json()["id"]
+
+    owner_teams = test_client.get("/teams", headers=_auth_headers(owner_token))
+    assert owner_teams.status_code == 200, owner_teams.text
+    assert [team["id"] for team in owner_teams.json()] == [team_id]
+
+    outsider_teams = test_client.get("/teams", headers=_auth_headers(outsider_token))
+    assert outsider_teams.status_code == 200, outsider_teams.text
+    assert outsider_teams.json() == []
+
+    discover = test_client.get("/teams/discover", headers=_auth_headers(outsider_token))
+    assert discover.status_code == 200, discover.text
+    assert any(team["id"] == team_id for team in discover.json())
+
+
+def test_malformed_token_subject_returns_401(client):
+    test_client, _tmp_root = client
+    token = create_access_token({"sub": "not-a-number"})
+
+    response = test_client.get("/users/me", headers=_auth_headers(token))
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"] == "Invalid authentication credentials"
+
+
+def test_mcp_session_is_bound_to_skill_id(client):
+    test_client, _tmp_root = client
+    super_admin_token = _register(test_client, "root")
+    owner_token = _register(test_client, "owner")
+    workspace_id = _workspace_id_for(test_client, owner_token, "personal")
+    skill_ids: list[int] = []
+
+    for index in range(2):
+        upload = test_client.post(
+            f"/workspaces/{workspace_id}/skills/upload",
+            headers=_auth_headers(owner_token),
+            data={"name": f"Echo {index}", "version": f"1.0.{index}", "visibility": "public"},
+            files={"package": ("server-transfer-skill.zip", _zip_example_skill(), "application/zip")},
+        )
+        assert upload.status_code == 200, upload.text
+        skill_id = upload.json()["id"]
+        skill_ids.append(skill_id)
+        versions = test_client.get(f"/skills/{skill_id}/versions", headers=_auth_headers(owner_token))
+        assert versions.status_code == 200, versions.text
+        version_id = versions.json()[0]["id"]
+        approve = test_client.post(f"/skill-versions/{version_id}/approve", headers=_auth_headers(super_admin_token))
+        assert approve.status_code == 200, approve.text
+        deploy = test_client.post(f"/skill-versions/{version_id}/deploy", headers=_auth_headers(super_admin_token))
+        assert deploy.status_code == 200, deploy.text
+
+    initialize = test_client.post(
+        f"/mcp/{workspace_id}/{skill_ids[0]}",
+        headers=_auth_headers(owner_token),
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    assert initialize.status_code == 200, initialize.text
+    session_id = initialize.headers["Mcp-Session-Id"]
+
+    wrong_skill = test_client.post(
+        f"/mcp/{workspace_id}/{skill_ids[1]}",
+        headers={**_auth_headers(owner_token), "Mcp-Session-Id": session_id},
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    assert wrong_skill.status_code == 400, wrong_skill.text
+    assert wrong_skill.json()["error"]["message"] == "Session does not match this endpoint"

@@ -22,7 +22,7 @@ def _global_tool_names() -> set[str]:
 
 
 def _is_repo_handler(handler_type: str | None) -> bool:
-    return handler_type in {"skill_repo_exec", "marketplace_repo"}
+    return handler_type in {"skill_repo_exec", "marketplace_repo", "docs_first_repo"}
 
 
 def _runtime_handler(version: SkillVersion) -> dict[str, Any]:
@@ -127,11 +127,13 @@ async def _resolve_skill_access(workspace_id: int, skill_id: int, authorization:
     raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Skill lookup failed")
 
 
-def _validate_session(mcp_session_id: str | None, workspace_id: int, mode: str) -> dict:
+def _validate_session(mcp_session_id: str | None, workspace_id: int, mode: str, skill_id: int | None = None) -> dict:
     sess = mcp_protocol.get_session_data(mcp_session_id) if mcp_session_id else None
     if not sess:
         raise ValueError("Invalid session")
     if sess.get("workspace_id") != workspace_id or sess.get("mode") != mode:
+        raise ValueError("Session does not match this endpoint")
+    if skill_id is not None and sess.get("skill_id") != skill_id:
         raise ValueError("Session does not match this endpoint")
     return sess
 
@@ -383,7 +385,7 @@ async def mcp_post(
         return _jsonrpc_result(req_id, {})
 
     try:
-        _validate_session(mcp_session_id, workspace_id, "skill")
+        _validate_session(mcp_session_id, workspace_id, "skill", skill_id)
     except ValueError as exc:
         return _jsonrpc_error(req_id, -32001, str(exc))
 
@@ -461,7 +463,7 @@ async def mcp_get(
 ):
     await _resolve_skill_access(workspace_id, skill_id, authorization)
     try:
-        _validate_session(mcp_session_id, workspace_id, "skill")
+        _validate_session(mcp_session_id, workspace_id, "skill", skill_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

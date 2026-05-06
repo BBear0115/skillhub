@@ -549,10 +549,9 @@ def _rewrite_path_value(value: Any, source_root: Path, target_root: Path) -> Any
     if isinstance(value, str):
         try:
             source_path = Path(value).resolve()
-            if str(source_path).startswith(str(source_root.resolve())):
-                relative_path = source_path.relative_to(source_root.resolve())
-                return str((target_root / relative_path).resolve())
-        except OSError:
+            relative_path = source_path.relative_to(source_root.resolve())
+            return str((target_root / relative_path).resolve())
+        except (OSError, ValueError):
             return value
         return value
     if isinstance(value, list):
@@ -604,7 +603,11 @@ def _ensure_team_exposure_row(session, workspace: Workspace, skill: Skill) -> No
 
 
 def _skill_versions(session, skill_id: int) -> list[SkillVersion]:
-    return session.exec(select(SkillVersion).where(SkillVersion.skill_id == skill_id)).all()
+    return session.exec(
+        select(SkillVersion)
+        .where(SkillVersion.skill_id == skill_id)
+        .order_by(SkillVersion.created_at.desc(), SkillVersion.id.desc())
+    ).all()
 
 
 def _require_skill_access(session, skill_id: int, user) -> tuple[Skill, Workspace]:
@@ -660,6 +663,10 @@ async def upload_skill_package(
 
     try:
         form_handler = json.loads(handler_config) if handler_config else {}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="handler_config must be valid JSON") from exc
+
+    try:
         requested_visibility = _validate_visibility(visibility)
         staging_parent = ensure_storage_root() / "tmp" / "upload-staging"
         staging_parent.mkdir(parents=True, exist_ok=True)
@@ -991,7 +998,7 @@ async def update_skill_prompt_config(
 @router.get("/skills/{skill_id}/versions", response_model=list[SkillVersionResponse])
 async def list_skill_versions(skill_id: int, session: SessionDep, user: CurrentUserDep):
     skill, _workspace = _require_skill_access(session, skill_id, user)
-    versions = session.exec(select(SkillVersion).where(SkillVersion.skill_id == skill.id)).all()
+    versions = _skill_versions(session, skill.id)
     return [_build_version_response(session, version, skill) for version in versions]
 
 

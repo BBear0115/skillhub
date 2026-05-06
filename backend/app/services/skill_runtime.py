@@ -133,9 +133,9 @@ def _rewrite_path_value(value: Any, source_root: Path, target_root: Path) -> Any
     if isinstance(value, str):
         try:
             source_path = Path(value).resolve()
-            if str(source_path).startswith(str(source_root.resolve())):
-                return str((target_root / source_path.relative_to(source_root.resolve())).resolve())
-        except OSError:
+            relative_path = source_path.relative_to(source_root.resolve())
+            return str((target_root / relative_path).resolve())
+        except (OSError, ValueError):
             return value
         return value
     if isinstance(value, list):

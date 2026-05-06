@@ -11,7 +11,7 @@ SkillHub 支持用户上传 Skill ZIP 包，由超管审核、部署并开放为
 当前产品模型保持简化：
 
 - 普通用户管理自己的 Skill。
-- 普通用户可以从 Skill Market 添加公开 Skill 到自己的工作列表。
+- 普通用户可以从 Skill Market 将公开 Skill 同步到自己的个人工作区。
 - 超管负责审核包、部署运行时、开放 MCP、配置提示词和维护市场 Skill。
 - 后端仍保留团队/工作区兼容能力，但主界面聚焦个人 Skill 和公开市场。
 
@@ -19,8 +19,8 @@ SkillHub 支持用户上传 Skill ZIP 包，由超管审核、部署并开放为
 
 - 登录、注册和 Bearer Token 认证。
 - 个人 Skill 上传与版本管理。
-- 公开 Skill Market，支持查看详情、工具、ZIP 下载和提示词复制。
-- 超管部署工作台，支持审核、部署、开放 MCP、拒绝和提示词配置。
+- 公开 Skill Market，支持查看详情、工具、ZIP 下载、提示词复制和同步到个人工作区。
+- 超管部署工作台，支持准备审核材料、部署、开放 MCP、拒绝和提示词配置。
 - 具体 Skill MCP 端点：`/mcp/{workspace_id}/{skill_id}`。
 - 自动生成 Agent 提示词，包含 MCP 连接方式、认证方式、Skill 使用说明和全局 Artifact 传输工具。
 - 全局 MCP 工具支持音频/文本上传、处理结果下载和临时文件清理。
@@ -109,14 +109,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-skillhub.ps1
 
 - 上传接口：`POST /workspaces/{workspace_id}/skills/upload`
 - ZIP 包应包含 `skill.json` 或 `skillhub.json`。
+- 如果包内 manifest 已包含版本号，上传表单中的 `version` 字段可以留空。
 - 仅文档型 Skill 也可以通过包含 `SKILL.md` 的包导入。
 - 仓库包可以通过 `skills-index.json` 或市场元数据暴露多个可执行 Skill。
 - 上传只会生成待审核版本。只有超管部署并批准后，Skill 才能通过 MCP 调用。
 
+## Skill Market 流程
+
+用户可以在 Skill Market 浏览公开 Skill。点击添加时，SkillHub 会通过以下接口将选中的公开版本同步到该用户的个人工作区：
+
+```text
+POST /skill-versions/{version_id}/sync-to-workspace
+```
+
+同步后的 Skill 会作为普通工作区 Skill 保存，因此可以跨浏览器和设备使用，不再只是本地收藏。
+
 ## 超管流程
 
 1. 用户上传 Skill ZIP。
-2. 超管调用 `POST /skill-versions/{version_id}/start-review` 开始审核。
+2. 超管调用 `POST /skill-versions/{version_id}/start-review` 准备审核材料。
 3. 超管部署该版本。
 4. 运行时部署会将审核包复制到后端存储，并为版本创建独立虚拟环境。
 5. 系统根据 `requirements.txt`、`pyproject.toml` 或运行时元数据安装依赖。
@@ -139,6 +150,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-skillhub.ps1
 - 运行时已部署
 - MCP 端点已发布
 - 请求携带有效 `Authorization: Bearer <access_token>`
+- 初始化后携带与该具体 Skill 端点匹配的 `Mcp-Session-Id`
 
 生成的提示词会包含完整调用顺序：
 
@@ -191,8 +203,8 @@ python backend/cleanup_audio_artifacts.py --older-than-hours 24 --mode hard
 
 后端测试：
 
-```powershell
-.\.venv\Scripts\pytest.exe backend\tests -q
+```bash
+backend/.venv/bin/python -m pytest -q
 ```
 
 前端构建：
@@ -205,6 +217,7 @@ npm run build
 ## 安全说明
 
 - 上传的 Skill 包在审核前都应视为不可信。
+- 上传压缩包和运行时路径会被校验，阻止路径穿越到 SkillHub 存储目录之外。
 - 每个真实部署都应使用强随机 `SECRET_KEY`。
 - `SUPER_ADMIN_ACCOUNT` 和 `SUPER_ADMIN_PASSWORD` 必须保存在 Git 之外。
 - 不要提交 `.env`、`backend/data`、`backend/storage`、日志、上传 ZIP、前端 `dist` 或远程同步临时目录。

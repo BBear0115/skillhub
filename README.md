@@ -11,7 +11,7 @@ SkillHub lets users upload Skill ZIP packages, lets super admins review and depl
 The current product model is intentionally simple:
 
 - Users manage their own Skills in a personal workspace.
-- Users can add public Skills from Skill Market into their own working list.
+- Users can sync public Skills from Skill Market into their personal workspace.
 - Super admins review packages, deploy runtimes, open MCP endpoints, configure prompts, and manage Market Skills.
 - Team/workspace compatibility remains in the backend, but the main UI flow focuses on personal Skills and the public Market.
 
@@ -19,8 +19,8 @@ The current product model is intentionally simple:
 
 - Login/register with bearer-token authentication.
 - Personal Skill upload and version tracking.
-- Public Skill Market with details, tools, ZIP download, and prompt copy.
-- Super-admin Deploy Workbench for review, deploy, open MCP, reject, and prompt configuration.
+- Public Skill Market with details, tools, ZIP download, prompt copy, and workspace sync.
+- Super-admin Deploy Workbench for preparing review materials, deploying, opening MCP, rejecting, and prompt configuration.
 - Concrete Skill MCP endpoint: `/mcp/{workspace_id}/{skill_id}`.
 - Generated agent prompts that include MCP connection steps, authentication, Skill usage instructions, and global artifact transfer tools.
 - Global MCP tools for audio/text upload, processed artifact download, and cleanup.
@@ -109,14 +109,25 @@ Default local URLs:
 
 - Upload endpoint: `POST /workspaces/{workspace_id}/skills/upload`
 - ZIP packages should include `skill.json` or `skillhub.json`.
+- The upload form `version` field is optional when the package manifest already contains a version.
 - A docs-only Skill can also be imported from a package containing `SKILL.md`.
 - A repository package can expose multiple executable Skills through `skills-index.json` or marketplace metadata.
 - Uploading only creates an uploaded version. It is not MCP-ready until a super admin deploys and approves it.
 
+## Skill Market Flow
+
+Public Skills can be browsed from Skill Market. When a user clicks add, SkillHub syncs the selected public version into that user's personal workspace through:
+
+```text
+POST /skill-versions/{version_id}/sync-to-workspace
+```
+
+The synced Skill is stored as a normal workspace Skill, so it is available across browsers and devices instead of being a local-only bookmark.
+
 ## Super Admin Flow
 
 1. User uploads a Skill ZIP.
-2. Super admin starts review with `POST /skill-versions/{version_id}/start-review`.
+2. Super admin prepares review materials with `POST /skill-versions/{version_id}/start-review`.
 3. Super admin deploys the version.
 4. Runtime deployment copies the reviewed package into backend storage and creates a per-version virtual environment.
 5. Dependencies are installed from `requirements.txt`, `pyproject.toml`, or runtime metadata.
@@ -139,6 +150,7 @@ Runtime visibility requires:
 - deployed runtime
 - published MCP endpoint URL
 - valid `Authorization: Bearer <access_token>`
+- matching `Mcp-Session-Id` for the concrete Skill endpoint after initialization
 
 Generated prompts include the full MCP call sequence:
 
@@ -191,8 +203,8 @@ The cleanup script only scans SkillHub artifact storage and does not delete Skil
 
 Backend tests:
 
-```powershell
-.\.venv\Scripts\pytest.exe backend\tests -q
+```bash
+backend/.venv/bin/python -m pytest -q
 ```
 
 Frontend build:
@@ -205,6 +217,7 @@ npm run build
 ## Security Notes
 
 - Treat uploaded Skill packages as untrusted until reviewed.
+- Uploaded archives and runtime paths are validated to block path traversal outside SkillHub storage.
 - Use a strong `SECRET_KEY` in every real deployment.
 - Keep `SUPER_ADMIN_ACCOUNT` and `SUPER_ADMIN_PASSWORD` outside Git.
 - Do not commit `.env`, `backend/data`, `backend/storage`, logs, uploaded ZIPs, generated frontend `dist`, or remote sync artifacts.

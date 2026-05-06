@@ -53,6 +53,19 @@ type MarketSkill = Skill & {
   prompt_join_logic: string
   agent_prompt: string | null
 }
+type ReviewWorkbench = {
+  review_attempt_id: string
+  workbench_path: string
+  workbench_package_path: string | null
+  workbench_extracted_path: string | null
+  deployment_kind: string
+  deployment_entrypoint: string | null
+  deployment_ready: boolean
+  tool_count: number
+  manifest_data: Record<string, unknown>
+  handler_config: Record<string, unknown>
+  deployment_steps: string[]
+}
 
 class ApiError extends Error {
   status: number
@@ -163,6 +176,29 @@ function buildPromptFromSkill(skill: Skill, version?: SkillVersion | null, acces
   ].join('\n')
 }
 
+function buildPromptFromReview(version: ReviewVersion, accessToken?: string | null) {
+  const endpoint = version.published_mcp_endpoint_url || `${API_BASE_URL}/mcp/${version.workspace_id}/${version.skill_id}`
+  const tools = version.tools?.map((tool) => tool.name).join(', ') || 'Call tools/list to inspect tools'
+  return [
+    'You can use the following SkillHub MCP skill.',
+    '',
+    `Skill: ${version.skill_name}`,
+    `Version: ${version.version}`,
+    `MCP endpoint: ${endpoint}`,
+    `Business tools: ${tools}`,
+    'Global MCP helper tools are available on the same endpoint.',
+    '',
+    GLOBAL_TRANSFER_PROMPT_BLOCK,
+    '',
+    'Connection and call logic:',
+    MCP_CALL_PROMPT_BLOCK,
+    '',
+    'Authentication:',
+    accessToken ? `Use this exact header when connecting: Authorization: Bearer ${accessToken}` : 'Use Authorization: Bearer <access_token> when connecting.',
+    'Do not omit the Authorization header. The MCP endpoint returns 401 Authentication required without it.',
+  ].join('\n')
+}
+
 export default function AppStable() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('skillhub-token'))
   const [authMode, setAuthMode] = useState<AuthMode>('login')
@@ -181,19 +217,16 @@ export default function AppStable() {
   const [marketSearch, setMarketSearch] = useState('')
   const [marketReadyOnly, setMarketReadyOnly] = useState(false)
   const [myFilter, setMyFilter] = useState<'all' | 'owned' | 'market'>('all')
-  const [marketRefs, setMarketRefs] = useState<number[]>(() => JSON.parse(localStorage.getItem('skillhub-market-refs') || '[]'))
   const [uploadOpen, setUploadOpen] = useState(false)
   const [promptContent, setPromptContent] = useState('')
   const [promptLogic, setPromptLogic] = useState('')
+  const [reviewWorkbench, setReviewWorkbench] = useState<ReviewWorkbench | null>(null)
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [status, setStatus] = useState('Ready')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   const personalWorkspace = useMemo(() => workspaces.find((item) => item.type === 'personal') ?? null, [workspaces])
-
-  useEffect(() => {
-    localStorage.setItem('skillhub-market-refs', JSON.stringify(marketRefs))
-  }, [marketRefs])
 
   useEffect(() => {
     if (!token) {
@@ -261,6 +294,18 @@ export default function AppStable() {
     setReview(await apiFetch<ReviewVersion[]>('/review/skill-versions', currentToken))
   }
 
+  async function runAction(key: string, fallbackMessage: string, action: () => Promise<void>) {
+    try {
+      setPendingAction(key)
+      setError(null)
+      await action()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : fallbackMessage)
+    } finally {
+      setPendingAction(null)
+    }
+  }
+
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     try {
@@ -285,61 +330,73 @@ export default function AppStable() {
     if (!token || !personalWorkspace) return
     const form = new FormData(event.currentTarget)
     const file = form.get('package')
-    const version = String(form.get('version') || '').trim()
-    if (!(file instanceof File) || !file.name || !version) {
-      setError('ZIP 包和版本号必填')
+    if (!(file instanceof File) || !file.name) {
+      setError('请上传 ZIP 包')
       return
     }
-    form.set('visibility', form.get('public') === 'on' ? 'public' : 'private')
-    form.delete('public')
-    await apiFetch<Skill>(`/workspaces/${personalWorkspace.id}/skills/upload`, token, { method: 'POST', body: form })
-    setUploadOpen(false)
-    await loadMySkills(token, personalWorkspace.id)
-    await loadMarket(token)
-    if (user?.is_super_admin) await loadReview(token)
-    setStatus('Skill uploaded')
+    await runAction('upload', 'Skill upload failed', async () => {
+      const version = String(form.get('version') || '').trim()
+      if (!version) form.delete('version')
+      form.set('visibility', form.get('public') === 'on' ? 'public' : 'private')
+      form.delete('public')
+      await apiFetch<Skill>(`/workspaces/${personalWorkspace.id}/skills/upload`, token, { method: 'POST', body: form })
+      setUploadOpen(false)
+      await loadMySkills(token, personalWorkspace.id)
+      await loadMarket(token)
+      if (user?.is_super_admin) await loadReview(token)
+      setStatus('Skill uploaded')
+    })
   }
 
   async function handleAdminAction(version: ReviewVersion, action: 'start-review' | 'deploy' | 'approve' | 'reject') {
     if (!token) return
     const path = action === 'start-review' ? `/skill-versions/${version.id}/start-review` : `/skill-versions/${version.id}/${action}`
-    await apiFetch(path, token, { method: 'POST', body: action === 'deploy' ? JSON.stringify({}) : undefined })
-    await loadReview(token)
-    await loadMarket(token)
-    if (personalWorkspace) await loadMySkills(token, personalWorkspace.id)
-    const statusByAction: Record<typeof action, string> = {
-      'start-review': 'Review workbench prepared',
-      deploy: 'Skill deployed; click Open if it is not approved yet',
-      approve: 'MCP opened',
-      reject: 'Version rejected',
-    }
-    setStatus(statusByAction[action])
+    await runAction(`${action}-${version.id}`, `${action} failed`, async () => {
+      const result = await apiFetch<ReviewWorkbench | SkillVersion>(path, token, { method: 'POST', body: action === 'deploy' ? JSON.stringify({}) : undefined })
+      if (action === 'start-review') setReviewWorkbench(result as ReviewWorkbench)
+      await loadReview(token)
+      await loadMarket(token)
+      if (personalWorkspace) await loadMySkills(token, personalWorkspace.id)
+      const statusByAction: Record<typeof action, string> = {
+        'start-review': 'Review workbench prepared',
+        deploy: 'Skill deployed; click Open if it is not approved yet',
+        approve: 'MCP opened',
+        reject: 'Version rejected',
+      }
+      setStatus(statusByAction[action])
+    })
   }
 
   async function savePrompt(skillId: number) {
     if (!token) return
-    await apiFetch(`/skills/${skillId}/prompt-config`, token, {
-      method: 'PUT',
-      body: JSON.stringify({ prompt_content: promptContent, prompt_join_logic: promptLogic }),
+    await runAction(`prompt-${skillId}`, 'Prompt config save failed', async () => {
+      await apiFetch(`/skills/${skillId}/prompt-config`, token, {
+        method: 'PUT',
+        body: JSON.stringify({ prompt_content: promptContent, prompt_join_logic: promptLogic }),
+      })
+      await loadMarket(token)
+      if (personalWorkspace) await loadMySkills(token, personalWorkspace.id)
+      if (user?.is_super_admin) await loadReview(token)
+      setStatus('Prompt config saved')
     })
-    await loadMarket(token)
-    if (personalWorkspace) await loadMySkills(token, personalWorkspace.id)
-    setStatus('Prompt config saved')
   }
 
   async function downloadVersion(version: SkillVersion) {
     if (!token) return
-    const response = await fetch(`${API_BASE_URL}${version.package_download_url}`, { headers: { Authorization: `Bearer ${token}` } })
-    if (!response.ok) throw new Error(`Download failed: ${response.status}`)
-    const blob = await response.blob()
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = version.upload_filename || `skill-${version.skill_id}-${version.version}.zip`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
+    await runAction(`download-${version.id}`, 'Download failed', async () => {
+      const response = await fetch(`${API_BASE_URL}${version.package_download_url}`, { headers: { Authorization: `Bearer ${token}` } })
+      if (!response.ok) throw new Error(`Download failed: ${response.status}`)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = version.upload_filename || `skill-${version.skill_id}-${version.version}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setStatus('Package download started')
+    })
   }
 
   async function deleteSkillFromMarket(skill: MarketSkill) {
@@ -349,7 +406,6 @@ export default function AppStable() {
     try {
       setError(null)
       await apiFetch(`/market/skills/${skill.id}`, token, { method: 'DELETE' })
-      setMarketRefs(marketRefs.filter((id) => id !== skill.id))
       setSelected(null)
       await loadMarket(token)
       if (personalWorkspace) await loadMySkills(token, personalWorkspace.id)
@@ -401,16 +457,38 @@ export default function AppStable() {
   function selectMarket(skill: MarketSkill) {
     setSelected(skill)
     setSelectedKind('market')
+    setReviewWorkbench(null)
     setPromptContent(skill.prompt_content || '')
     setPromptLogic(skill.prompt_join_logic || '')
   }
 
-  function selectReview(version: ReviewVersion) {
+  async function selectReview(version: ReviewVersion) {
     setSelected(version)
     setSelectedKind('review')
-    const found = market.find((item) => item.id === version.skill_id)
-    setPromptContent(found?.prompt_content || '')
-    setPromptLogic(found?.prompt_join_logic || '')
+    setReviewWorkbench(null)
+    if (!token) return
+    try {
+      const skill = await apiFetch<Skill>(`/skills/${version.skill_id}`, token)
+      setPromptContent(skill.prompt_content || '')
+      setPromptLogic(skill.prompt_join_logic || '')
+    } catch (err) {
+      setPromptContent('')
+      setPromptLogic('')
+      setError(err instanceof Error ? err.message : 'Failed to load prompt config')
+    }
+  }
+
+  async function syncMarketSkill(skill: MarketSkill) {
+    if (!token || !personalWorkspace || !skill.latest_version) return
+    await runAction(`sync-${skill.id}`, 'Market skill sync failed', async () => {
+      await apiFetch<Skill>(`/skill-versions/${skill.latest_version!.id}/sync-to-workspace`, token, {
+        method: 'POST',
+        body: JSON.stringify({ target_workspace_id: personalWorkspace.id, visibility: 'private' }),
+      })
+      await loadMySkills(token, personalWorkspace.id)
+      await loadMarket(token)
+      setStatus('Skill added to your workspace')
+    })
   }
 
   const marketRows = market
@@ -418,12 +496,13 @@ export default function AppStable() {
     .filter((skill) => `${skill.name} ${skill.description || ''} ${skill.uploader_account || ''}`.toLowerCase().includes(marketSearch.toLowerCase()))
 
   const myRows = [
-    ...mine.map((skill) => ({ kind: 'owned' as const, skill })),
-    ...market.filter((skill) => marketRefs.includes(skill.id) && !mine.some((owned) => owned.id === skill.id)).map((skill) => ({ kind: 'market' as const, skill })),
+    ...mine.map((skill) => ({
+      kind: market.some((item) => item.name === skill.name && item.id !== skill.id) ? 'market' as const : 'owned' as const,
+      skill,
+    })),
   ].filter((item) => myFilter === 'all' || item.kind === myFilter)
 
-  function promptForMySkill(kind: 'owned' | 'market', skill: Skill | MarketSkill) {
-    if (kind === 'market') return (skill as MarketSkill).agent_prompt
+  function promptForMySkill(_kind: 'owned' | 'market', skill: Skill | MarketSkill) {
     if (skill.agent_prompt) return skill.agent_prompt
     const runtimeMarketSkill = market.find((item) => item.mcp_ready && item.name === skill.name && item.agent_prompt)
     return runtimeMarketSkill?.agent_prompt || null
@@ -484,7 +563,7 @@ export default function AppStable() {
               </div>
               <div className="content-scroll">
                 <table className="table"><thead><tr><th>Skill</th><th>来源</th><th>版本</th><th>可见性</th><th>状态</th><th>操作</th></tr></thead><tbody>
-                  {myRows.map(({ kind, skill }) => <tr key={`${kind}-${skill.id}`}><td className="name-cell"><strong>{skill.name}</strong><span>{skill.description || '-'}</span></td><td>{kind === 'owned' ? '我上传' : '来自市场'}</td><td>{skill.current_approved_version?.version || (skill as MarketSkill).latest_version?.version || '-'}</td><td><span className={`badge ${skill.visibility === 'public' ? 'ok' : 'neutral'}`}>{skill.visibility === 'public' ? '公开' : '私有'}</span></td><td><span className={`badge ${badgeClass(statusText(skill))}`}>{statusText(skill)}</span></td><td className="actions"><button onClick={() => kind === 'market' ? selectMarket(skill as MarketSkill) : (setSelected(skill), setSelectedKind('skill'))}>详情</button><button disabled={!promptForMySkill(kind, skill)} onClick={() => copyPrompt(promptForMySkill(kind, skill))}>复制 Prompt</button>{kind === 'market' ? <button className="danger-button" onClick={() => setMarketRefs(marketRefs.filter((id) => id !== skill.id))}>移除</button> : null}</td></tr>)}
+                  {myRows.map(({ kind, skill }) => <tr key={`${kind}-${skill.id}`}><td className="name-cell"><strong>{skill.name}</strong><span>{skill.description || '-'}</span></td><td>{kind === 'owned' ? '我上传' : '来自市场'}</td><td>{skill.current_approved_version?.version || skill.deployed_version?.version || '-'}</td><td><span className={`badge ${skill.visibility === 'public' ? 'ok' : 'neutral'}`}>{skill.visibility === 'public' ? '公开' : '私有'}</span></td><td><span className={`badge ${badgeClass(statusText(skill))}`}>{statusText(skill)}</span></td><td className="actions"><button onClick={() => (setSelected(skill), setSelectedKind('skill'), setReviewWorkbench(null))}>详情</button><button disabled={!promptForMySkill(kind, skill)} onClick={() => copyPrompt(promptForMySkill(kind, skill))}>复制 Prompt</button></td></tr>)}
                 </tbody></table>
               </div>
             </section>
@@ -494,7 +573,8 @@ export default function AppStable() {
             <section className="main-panel">
               <div className="panel-header"><div className="panel-title"><h1>Skill Market</h1><p>浏览所有公开 Skill。</p></div><div className="filter-row"><input value={marketSearch} onChange={(event) => setMarketSearch(event.target.value)} placeholder="搜索 Skill、描述或上传人" /><label><input type="checkbox" checked={marketReadyOnly} onChange={(event) => setMarketReadyOnly(event.target.checked)} /> 只看 MCP 可用</label></div></div>
               <div className="content-scroll market-grid">{marketRows.map((skill) => {
-                const added = marketRefs.includes(skill.id) || mine.some((owned) => owned.id === skill.id)
+                const added = mine.some((owned) => owned.id === skill.id || owned.name === skill.name)
+                const syncing = pendingAction === `sync-${skill.id}`
                 const visibleTools = skill.tools.slice(0, 2)
                 return <article className="market-card" key={skill.id}>
                   <div className="market-card-body">
@@ -518,7 +598,7 @@ export default function AppStable() {
                   </div>
                   <div className="market-card-foot">
                     <button className="primary-button" onClick={() => selectMarket(skill)}>查看</button>
-                    <button disabled={added} onClick={() => setMarketRefs([...marketRefs, skill.id])}>{added ? '已添加' : '添加'}</button>
+                    <button disabled={added || syncing || !skill.latest_version} onClick={() => syncMarketSkill(skill)}>{syncing ? '添加中' : added ? '已添加' : '添加'}</button>
                     <button disabled={!skill.agent_prompt} onClick={() => copyPrompt(skill.agent_prompt)}>Prompt</button>
                     {user.is_super_admin ? <button className="danger-button" onClick={() => deleteSkillFromMarket(skill)}>删除</button> : null}
                   </div>
@@ -551,7 +631,7 @@ export default function AppStable() {
                     <h2>普通用户使用流程</h2>
                     <ol className="doc-steps">
                       <li><strong>登录系统</strong><span>使用账号密码登录。首次使用可以注册账号，登录后进入 SkillHub 工作台。</span></li>
-                      <li><strong>上传 Skill</strong><span>在“我的 Skill”点击“上传 Skill”，填写名称、版本号、描述并上传 ZIP 包；需要公开时勾选“公开到 Skill Market”。</span></li>
+                      <li><strong>上传 Skill</strong><span>在“我的 Skill”点击“上传 Skill”，填写名称、描述并上传 ZIP 包；版本号留空时使用包内 manifest 版本，需要公开时勾选“公开到 Skill Market”。</span></li>
                       <li><strong>查看状态</strong><span>在“我的 Skill”查看版本、可见性和状态。待管理员处理表示还未完成审核、部署或开放 MCP。</span></li>
                       <li><strong>引用市场 Skill</strong><span>进入 Skill Market 搜索公开 Skill，点击“添加”后会出现在“我的 Skill”的“来自市场”分类。</span></li>
                       <li><strong>复制 Prompt</strong><span>Skill 完成 MCP 开放后，点击“复制 Prompt”或详情页中的 Prompt 操作，把连接说明交给 Agent 使用。</span></li>
@@ -561,7 +641,7 @@ export default function AppStable() {
                   <section className="doc-section">
                     <h2>主要页面说明</h2>
                     <table className="doc-table"><thead><tr><th>页面</th><th>用途</th></tr></thead><tbody>
-                      <tr><td>我的 Skill</td><td>管理个人上传的 Skill 和从市场添加的 Skill；支持查看详情、复制 Prompt、移除市场引用。</td></tr>
+                      <tr><td>我的 Skill</td><td>管理个人上传的 Skill 和从市场同步到个人工作区的 Skill；支持查看详情和复制 Prompt。</td></tr>
                       <tr><td>Skill Market</td><td>浏览所有公开 Skill；支持按名称、描述、上传人搜索，并可筛选 MCP 可用的 Skill。</td></tr>
                       <tr><td>使用说明</td><td>查看 SkillHub 的完整操作流程、字段含义、MCP 调用方式和常见问题。</td></tr>
                       {user.is_super_admin ? <tr><td>部署工作台</td><td>超管审核上传版本、部署运行时、开放 MCP 或拒绝版本。</td></tr> : null}
@@ -638,10 +718,11 @@ export default function AppStable() {
                     <span className={`badge ${badgeClass(versionStatusText(version))}`}>{versionStatusText(version)}</span>
                   </div>
                   <div className="review-actions">
-                    <button onClick={() => selectReview(version)}>查看</button>
-                    <button disabled={isRejected || isDeploying || isDeployed} onClick={() => handleAdminAction(version, 'deploy')}>{isDeploying ? '部署中' : isDeployed ? '已部署' : '部署'}</button>
-                    <button disabled={isRejected || !isDeployed || isOpen} onClick={() => handleAdminAction(version, 'approve')}>{isOpen ? '已开放' : '开放'}</button>
-                    <button className="danger-button" disabled={isOpen} onClick={() => handleAdminAction(version, 'reject')}>拒绝</button>
+                    <button onClick={() => void selectReview(version)}>查看</button>
+                    <button disabled={pendingAction === `start-review-${version.id}`} onClick={() => handleAdminAction(version, 'start-review')}>{pendingAction === `start-review-${version.id}` ? '准备中' : '准备审核'}</button>
+                    <button disabled={Boolean(pendingAction) || isRejected || isDeploying || isDeployed} onClick={() => handleAdminAction(version, 'deploy')}>{pendingAction === `deploy-${version.id}` || isDeploying ? '部署中' : isDeployed ? '已部署' : '部署'}</button>
+                    <button disabled={Boolean(pendingAction) || isRejected || !isDeployed || isOpen} onClick={() => handleAdminAction(version, 'approve')}>{pendingAction === `approve-${version.id}` ? '开放中' : isOpen ? '已开放' : '开放'}</button>
+                    <button className="danger-button" disabled={Boolean(pendingAction) || isOpen} onClick={() => handleAdminAction(version, 'reject')}>{pendingAction === `reject-${version.id}` ? '拒绝中' : '拒绝'}</button>
                   </div>
                 </article>
               })}</div>
@@ -650,9 +731,9 @@ export default function AppStable() {
         </section>
       </div>
 
-      {uploadOpen ? <div className="modal-backdrop"><form className="modal-card" onSubmit={handleUpload}><div className="modal-header"><h2>上传 Skill</h2><button type="button" onClick={() => setUploadOpen(false)}>关闭</button></div><div className="form-grid"><label>Skill 名称<input name="name" /></label><label>版本号<input name="version" /></label><label>描述<textarea name="description" /></label><label>ZIP 包<input name="package" type="file" accept=".zip" /></label><label className="checkbox-row"><input name="public" type="checkbox" /> 公开到 Skill Market</label></div><div className="modal-actions"><button type="button" onClick={() => setUploadOpen(false)}>取消</button><button className="primary-button">提交上传</button></div></form></div> : null}
+      {uploadOpen ? <div className="modal-backdrop"><form className="modal-card" onSubmit={handleUpload}><div className="modal-header"><h2>上传 Skill</h2><button type="button" onClick={() => setUploadOpen(false)}>关闭</button></div><div className="form-grid"><label>Skill 名称<input name="name" /></label><label>版本号（可选）<input name="version" placeholder="留空则使用包内版本" /></label><label>描述<textarea name="description" /></label><label>ZIP 包<input name="package" type="file" accept=".zip" /></label><label className="checkbox-row"><input name="public" type="checkbox" /> 公开到 Skill Market</label></div><div className="modal-actions"><button type="button" onClick={() => setUploadOpen(false)}>取消</button><button className="primary-button" disabled={pendingAction === 'upload'}>{pendingAction === 'upload' ? '上传中' : '提交上传'}</button></div></form></div> : null}
 
-      {selected ? <DetailModal selected={selected} kind={selectedKind} versions={versions[(selected as Skill).id] || []} accessToken={token} isAdmin={user.is_super_admin && view === 'admin'} canDeleteMarket={user.is_super_admin && selectedKind === 'market'} promptContent={promptContent} promptLogic={promptLogic} setPromptContent={setPromptContent} setPromptLogic={setPromptLogic} onClose={() => setSelected(null)} onCopy={copyPrompt} onDownload={downloadVersion} onSavePrompt={savePrompt} onDeleteMarket={deleteSkillFromMarket} /> : null}
+      {selected ? <DetailModal selected={selected} kind={selectedKind} versions={versions[(selected as Skill).id] || []} accessToken={token} isAdmin={user.is_super_admin && view === 'admin'} canDeleteMarket={user.is_super_admin && selectedKind === 'market'} promptContent={promptContent} promptLogic={promptLogic} reviewWorkbench={reviewWorkbench} pendingAction={pendingAction} setPromptContent={setPromptContent} setPromptLogic={setPromptLogic} onClose={() => setSelected(null)} onCopy={copyPrompt} onDownload={downloadVersion} onSavePrompt={savePrompt} onDeleteMarket={deleteSkillFromMarket} /> : null}
     </main>
   )
 }
@@ -666,28 +747,33 @@ function DetailModal(props: {
   canDeleteMarket: boolean
   promptContent: string
   promptLogic: string
+  reviewWorkbench: ReviewWorkbench | null
+  pendingAction: string | null
   setPromptContent: (value: string) => void
   setPromptLogic: (value: string) => void
   onClose: () => void
   onCopy: (text: string | null | undefined) => void
-  onDownload: (version: SkillVersion) => void
-  onSavePrompt: (skillId: number) => void
-  onDeleteMarket: (skill: MarketSkill) => void
+  onDownload: (version: SkillVersion) => Promise<void>
+  onSavePrompt: (skillId: number) => Promise<void>
+  onDeleteMarket: (skill: MarketSkill) => Promise<void>
 }) {
   const item = props.selected
   const marketItem = props.kind === 'market' ? (item as MarketSkill) : null
   const reviewItem = props.kind === 'review' ? (item as ReviewVersion) : null
   const name = reviewItem?.skill_name || (item as Skill).name
   const latest = marketItem?.latest_version || reviewItem || props.versions[0]
-  const prompt = marketItem?.agent_prompt || (item as Skill).agent_prompt || (latest?.published_mcp_endpoint_url ? buildPromptFromSkill(item as Skill, latest, props.accessToken) : null)
+  const prompt = reviewItem
+    ? (latest?.published_mcp_endpoint_url ? buildPromptFromReview(reviewItem, props.accessToken) : null)
+    : marketItem?.agent_prompt || (item as Skill).agent_prompt || (latest?.published_mcp_endpoint_url ? buildPromptFromSkill(item as Skill, latest, props.accessToken) : null)
   const tools = marketItem?.tools || latest?.tools || []
   const skillId = reviewItem?.skill_id || (item as Skill).id
   return <div className="modal-backdrop detail-backdrop"><aside className="detail-modal-card"><div className="panel-header"><div className="panel-title"><h2>{name}</h2><p>{marketItem?.uploader_account || latest?.uploaded_by_account || '-'}</p></div><button onClick={props.onClose}>关闭</button></div><div className="detail-body">
-    <section className="detail-section"><h3>状态</h3><div className="kv"><span>版本</span><span>{latest?.version || '-'}</span></div><div className="kv"><span>部署</span><span>{latest?.deploy_status || '-'}</span></div><div className="kv"><span>ZIP</span>{latest ? <button onClick={() => props.onDownload(latest)}>下载 ZIP</button> : <span>-</span>}</div></section>
+    <section className="detail-section"><h3>状态</h3><div className="kv"><span>版本</span><span>{latest?.version || '-'}</span></div><div className="kv"><span>部署</span><span>{latest?.deploy_status || '-'}</span></div><div className="kv"><span>ZIP</span>{latest ? <button disabled={props.pendingAction === `download-${latest.id}`} onClick={() => void props.onDownload(latest)}>{props.pendingAction === `download-${latest.id}` ? '下载中' : '下载 ZIP'}</button> : <span>-</span>}</div></section>
     <section className="detail-section"><h3>Agent Prompt</h3>{prompt ? <><code className="code-block prompt-block">{prompt}</code><button className="primary-button" onClick={() => props.onCopy(prompt)}>复制 Agent Prompt</button></> : <p>管理员尚未开放 MCP。</p>}</section>
-    <section className="detail-section"><h3>使用说明</h3><p>{marketItem?.prompt_content || (item as Skill).description || '-'}</p></section>
+    <section className="detail-section"><h3>使用说明</h3><p>{marketItem?.prompt_content || (reviewItem ? props.promptContent : (item as Skill).description) || '-'}</p></section>
     <section className="detail-section"><h3>工具</h3><ul>{tools.map((tool) => <li key={tool.id}>{tool.name}</li>)}</ul></section>
+    {reviewItem && props.reviewWorkbench ? <section className="detail-section"><h3>审核材料</h3><div className="kv"><span>Workbench</span><span>{props.reviewWorkbench.workbench_path}</span></div><div className="kv"><span>包目录</span><span>{props.reviewWorkbench.workbench_extracted_path || '-'}</span></div><div className="kv"><span>类型</span><span>{props.reviewWorkbench.deployment_kind}</span></div><div className="kv"><span>工具数</span><span>{props.reviewWorkbench.tool_count}</span></div><ul>{props.reviewWorkbench.deployment_steps.map((step) => <li key={step}>{step}</li>)}</ul></section> : null}
     {props.canDeleteMarket && marketItem ? <section className="detail-section"><h3>危险操作</h3><button className="danger-button" onClick={() => props.onDeleteMarket(marketItem)}>从 Skill Market 删除</button></section> : null}
-    {props.isAdmin ? <section className="detail-section"><h3>超管提示词配置</h3><label className="prompt-editor-label">提示词内容<textarea value={props.promptContent} onChange={(event) => props.setPromptContent(event.target.value)} /></label><label className="prompt-editor-label">拼接逻辑<textarea value={props.promptLogic} onChange={(event) => props.setPromptLogic(event.target.value)} /></label><button className="primary-button" onClick={() => props.onSavePrompt(skillId)}>保存提示词配置</button></section> : null}
+    {props.isAdmin ? <section className="detail-section"><h3>超管提示词配置</h3><label className="prompt-editor-label">提示词内容<textarea value={props.promptContent} onChange={(event) => props.setPromptContent(event.target.value)} /></label><label className="prompt-editor-label">拼接逻辑<textarea value={props.promptLogic} onChange={(event) => props.setPromptLogic(event.target.value)} /></label><button className="primary-button" disabled={props.pendingAction === `prompt-${skillId}`} onClick={() => void props.onSavePrompt(skillId)}>{props.pendingAction === `prompt-${skillId}` ? '保存中' : '保存提示词配置'}</button></section> : null}
   </div></aside></div>
 }
